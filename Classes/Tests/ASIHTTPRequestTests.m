@@ -17,8 +17,8 @@
 
 - (void)testBasicDownload
 {
-	NSURL *url = [[[NSURL alloc] initWithString:@"http://allseeing-i.com"] autorelease];
-	ASIHTTPRequest *request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
+	NSURL *url = [NSURL URLWithString:@"http://allseeing-i.com"];
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:url];
 	[request start];
 	NSString *html = [request responseString];
 	GHAssertNotNil(html,@"Basic synchronous request failed");
@@ -109,10 +109,54 @@
 	}
 }
 
+- (void)testHTTPVersion
+{
+	NSURL *url = [[[NSURL alloc] initWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/http-version"] autorelease];
+	ASIHTTPRequest *request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
+	[request start];
+	
+	BOOL success = [[request responseString] isEqualToString:@"HTTP/1.1"];
+	GHAssertTrue(success,@"Wrong HTTP version used");
+	
+	request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
+	[request setUseHTTPVersionOne:YES];
+	[request start];
+	
+	success = [[request responseString] isEqualToString:@"HTTP/1.0"];
+	GHAssertTrue(success,@"Wrong HTTP version used");	
+}
+
+- (void)testAutomaticRedirection
+{
+	ASIHTTPRequest *request;
+	BOOL success;
+	int i;
+	for (i=301; i<308; i++) {
+		NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"http://allseeing-i.com/ASIHTTPRequest/tests/redirect/%hi",i]];
+		request = [ASIHTTPRequest requestWithURL:url];
+		[request setShouldRedirect:NO];
+		[request start];
+		if (i == 304) { // 304s will not contain a body, as per rfc2616. Will test 304 handling in a future test when we have etag support
+			continue;
+		}
+		success = [[request responseString] isEqualToString:[NSString stringWithFormat:@"Non-redirected content with %hi status code",i]];
+		GHAssertTrue(success,[NSString stringWithFormat:@"Got the wrong content when not redirecting after a %hi",i]);
+	
+		request = [ASIHTTPRequest requestWithURL:url];
+		[request start];
+		success = [[request responseString] isEqualToString:[NSString stringWithFormat:@"Redirected content after a %hi status code",i]];
+		GHAssertTrue(success,[NSString stringWithFormat:@"Got the wrong content when redirecting after a %hi",i]);
+	
+		success = ([request responseStatusCode] == 200);
+		GHAssertTrue(success,[NSString stringWithFormat:@"Got the wrong status code (expected %hi)",i]);
+
+	}
+}
+
 - (void)testUploadContentLength
 {
 	//This url will return the contents of the Content-Length request header
-	NSURL *url = [[[NSURL alloc] initWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/content-length"] autorelease];
+	NSURL *url = [NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/content-length"];
 	ASIHTTPRequest *request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
 	[request setPostBody:[NSMutableData dataWithLength:1024*32]];
 	[request start];

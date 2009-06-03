@@ -17,7 +17,7 @@
 // We use our own custom run loop mode as CoreAnimation seems to want to hijack our threads otherwise
 static CFStringRef ASIHTTPRequestRunMode = CFSTR("ASIHTTPRequest");
 
-static NSString *NetworkRequestErrorDomain = @"com.Your-Company.Your-Product.NetworkError.";
+NSString* const NetworkRequestErrorDomain = @"ASIHTTPRequestErrorDomain";
 
 static const CFOptionFlags kNetworkEvents = kCFStreamEventOpenCompleted | kCFStreamEventHasBytesAvailable | kCFStreamEventEndEncountered | kCFStreamEventErrorOccurred;
 
@@ -37,6 +37,32 @@ static NSError *ASIRequestCancelledError;
 static NSError *ASIRequestTimedOutError;
 static NSError *ASIAuthenticationError;
 static NSError *ASIUnableToCreateRequestError;
+
+// Private stuff
+@interface ASIHTTPRequest ()
+	@property (retain,setter=setURL:) NSURL *url;
+	@property (assign) BOOL complete;
+	@property (retain) NSDictionary *responseHeaders;
+	@property (retain) NSArray *responseCookies;
+	@property (assign) int responseStatusCode;
+	@property (retain) NSMutableData *rawResponseData;
+	@property (retain, nonatomic) NSDate *lastActivityTime;
+	@property (assign) unsigned long long contentLength;
+	@property (assign) unsigned long long partialDownloadSize;
+	@property (assign, nonatomic) unsigned long long uploadBufferSize;
+	@property (assign) NSStringEncoding responseEncoding;
+	@property (retain, nonatomic) NSOutputStream *postBodyWriteStream;
+	@property (retain, nonatomic) NSInputStream *postBodyReadStream;
+	@property (assign) unsigned long long totalBytesRead;
+	@property (assign) unsigned long long totalBytesSent;
+	@property (assign, nonatomic) unsigned long long lastBytesRead;
+	@property (assign, nonatomic) unsigned long long lastBytesSent;
+	@property (retain) NSLock *cancelledLock;
+	@property (assign, nonatomic) BOOL haveBuiltPostBody;
+	@property (retain, nonatomic) NSOutputStream *fileDownloadOutputStream;
+	@property (assign, nonatomic) int authenticationRetryCount;
+	@property (assign, nonatomic) BOOL updatedProgress;
+@end
 
 @implementation ASIHTTPRequest
 
@@ -61,48 +87,27 @@ static NSError *ASIUnableToCreateRequestError;
 {
 	self = [super init];
 	[self setRequestMethod:@"GET"];
-	lastBytesSent = 0;
 
-	showAccurateProgress = YES;
-	shouldResetProgressIndicators = YES;
-	updatedProgress = NO;
-	[self setMainRequest:nil];
-	[self setPassword:nil];
-	[self setUsername:nil];
-	[self setRequestHeaders:nil];
-	authenticationRetryCount = 0;
-	authenticationMethod = nil;
-	authenticationRealm = nil;
-	outputStream = nil;
-	requestAuthentication = NULL;
-	haveBuiltPostBody = NO;
-	request = NULL;
-	[self setDidCreateTemporaryPostDataFile:NO];
-	[self setPostBodyFilePath:nil];
-	[self setPostBodyWriteStream:nil];
-	[self setPostBodyReadStream:nil];
-	[self setShouldStreamPostDataFromDisk:NO];
+	[self setShouldRedirect:YES];
+	[self setShowAccurateProgress:YES];
+	[self setShouldResetProgressIndicators:YES];
 	[self setAllowCompressedResponse:YES];
 	[self setDefaultResponseEncoding:NSISOLatin1StringEncoding];
-	[self setUploadBufferSize:0];
-	[self setContentLength:0];
-	[self setPartialDownloadSize:0];
-	[self setResponseHeaders:nil];
+	
 	[self setTimeOutSeconds:10];
-	[self setAllowResumeForFileDownloads:NO];
-	[self setUseKeychainPersistance:NO];
 	[self setUseSessionPersistance:YES];
 	[self setUseCookiePersistance:YES];
-	[self setRawResponseData:nil];
 	[self setRequestCookies:[[[NSMutableArray alloc] init] autorelease]];
 	[self setDidFinishSelector:@selector(requestFinished:)];
 	[self setDidFailSelector:@selector(requestFailed:)];
-	[self setDelegate:nil];
-	[self setQueue:nil];
-	[self setUserInfo:nil];
-	url = [newURL retain];
-	cancelledLock = [[NSLock alloc] init];
+	[self setURL:newURL];
+	[self setCancelledLock:[[[NSLock alloc] init] autorelease]];
 	return self;
+}
+
++ (id)requestWithURL:(NSURL *)newURL
+{
+	return [[[ASIHTTPRequest alloc] initWithURL:newURL] autorelease];
 }
 
 - (void)dealloc
@@ -123,7 +128,7 @@ static NSError *ASIUnableToCreateRequestError;
 	[requestCookies release];
 	[downloadDestinationPath release];
 	[temporaryFileDownloadPath release];
-	[outputStream release];
+	[fileDownloadOutputStream release];
 	[username release];
 	[password release];
 	[domain release];
@@ -174,14 +179,14 @@ static NSError *ASIUnableToCreateRequestError;
 		[self setPostLength:[postBody length]];
 	}
 		
-	if (postLength > 0) 
+	if ([self postLength] > 0) 
 	{
 		if (![requestMethod isEqualToString:@"POST"] && ![requestMethod isEqualToString:@"PUT"]) {
 			[self setRequestMethod:@"POST"];
 		}
 		[self addRequestHeader:@"Content-Length" value:[NSString stringWithFormat:@"%llu",postLength]];
 	}
-	haveBuiltPostBody = YES;
+	[self setHaveBuiltPostBody:YES];
 }
 
 // Sets up storage for the post body
@@ -239,7 +244,7 @@ static NSError *ASIUnableToCreateRequestError;
 
 - (BOOL)isFinished 
 {
-	return complete;
+	return [self complete];
 }
 
 
@@ -248,7 +253,7 @@ static NSError *ASIUnableToCreateRequestError;
 	[self failWithError:ASIRequestCancelledError];
 	[super cancel];
 	[self cancelLoad];
-	complete = YES;
+	[self setComplete:YES];
 
 }
 
@@ -289,23 +294,24 @@ static NSError *ASIUnableToCreateRequestError;
 	[pool release];
 	pool = [[NSAutoreleasePool alloc] init];
 	
-	complete = NO;
+	[self setComplete:NO];
 	
-	if (!url) {
+	if (![self url]) {
 		[self failWithError:ASIUnableToCreateRequestError];
 		return;		
 	}
 	
-	if (!haveBuiltPostBody) {
+	if (![self haveBuiltPostBody]) {
 		[self buildPostBody];
 	}
 	
     // Create a new HTTP request.
-	request = CFHTTPMessageCreateRequest(kCFAllocatorDefault, (CFStringRef)requestMethod, (CFURLRef)url, self.HTTPVersionOne ? kCFHTTPVersion1_0 : kCFHTTPVersion1_1);
+	request = CFHTTPMessageCreateRequest(kCFAllocatorDefault, (CFStringRef)requestMethod, (CFURLRef)url, [self useHTTPVersionOne] ? kCFHTTPVersion1_0 : kCFHTTPVersion1_1);
     if (!request) {
 		[self failWithError:ASIUnableToCreateRequestError];
 		return;
     }
+	
 	
 	// If we've already talked to this server and have valid credentials, let's apply them to the request
 	if (useSessionPersistance && sessionCredentials && sessionAuthentication) {
@@ -393,18 +399,18 @@ static NSError *ASIUnableToCreateRequestError;
 	[authenticationLock release];
 	authenticationLock = [[NSConditionLock alloc] initWithCondition:1];
 	
-	complete = NO;
-	totalBytesRead = 0;
-	lastBytesRead = 0;
+	[self setComplete:NO];
+	[self setTotalBytesRead:0];
+	[self setLastBytesRead:0];
 	
 	// If we're retrying a request after an authentication failure, let's remove any progress we made
-	if (lastBytesSent > 0) {
+	if ([self lastBytesSent] > 0) {
 		[self removeUploadProgressSoFar];
 	}
 	
-	lastBytesSent = 0;
-	if (shouldResetProgressIndicators) {
-		contentLength = 0;
+	[self setLastBytesSent:0];
+	if ([self shouldResetProgressIndicators]) {
+		[self setContentLength:0];
 		[self resetDownloadProgress:0];
 	}
 	[self setResponseHeaders:nil];
@@ -424,6 +430,9 @@ static NSError *ASIUnableToCreateRequestError;
 		[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIInternalErrorWhileBuildingRequestType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"Unable to create read stream",NSLocalizedDescriptionKey,nil]]];
         return;
     }
+	
+	// Tell CFNetwork to automatically redirect for 30x status codes
+	CFReadStreamSetProperty(readStream, kCFStreamPropertyHTTPShouldAutoredirect, [self shouldRedirect] ? kCFBooleanTrue : kCFBooleanFalse);
     
     // Set the client
 	CFStreamClientContext ctxt = {0, self, NULL, NULL, NULL};
@@ -486,7 +495,7 @@ static NSError *ASIUnableToCreateRequestError;
 			if (contentLength <= uploadBufferSize || (uploadBufferSize > 0 && totalBytesSent > uploadBufferSize)) {
 				[self failWithError:ASIRequestTimedOutError];
 				[self cancelLoad];
-				complete = YES;
+				[self setComplete:YES];
 				break;
 			}
 		}
@@ -499,11 +508,11 @@ static NSError *ASIUnableToCreateRequestError;
 		// Find out if we've sent any more data than last time, and reset the timeout if so
 		if (totalBytesSent > lastBytesSent) {
 			[self setLastActivityTime:[NSDate date]];
-			lastBytesSent = totalBytesSent;
+			[self setLastBytesSent:totalBytesSent];
 		}
 		
 		// Find out how much data we've uploaded so far
-		totalBytesSent = [[(NSNumber *)CFReadStreamCopyProperty(readStream, kCFStreamPropertyHTTPRequestBytesWrittenCount) autorelease] unsignedLongLongValue];
+		[self setTotalBytesSent:[[(NSNumber *)CFReadStreamCopyProperty(readStream, kCFStreamPropertyHTTPRequestBytesWrittenCount) autorelease] unsignedLongLongValue]];
 
 		[self updateProgressIndicators];
 		
@@ -532,7 +541,7 @@ static NSError *ASIUnableToCreateRequestError;
 	
 	// If we were downloading to a file
 	} else if (temporaryFileDownloadPath) {
-		[outputStream close];
+		[fileDownloadOutputStream close];
 		
 		// If we haven't said we might want to resume, let's remove the temporary file too
 		if (![self allowResumeForFileDownloads]) {
@@ -583,7 +592,7 @@ static NSError *ASIUnableToCreateRequestError;
 	
 	//Only update progress if this isn't a HEAD request used to preset the content-length
 	if (!mainRequest) {
-		if (showAccurateProgress || (complete && !updatedProgress)) {
+		if ([self showAccurateProgress] || ([self complete] && ![self updatedProgress])) {
 			[self updateUploadProgress];
 			[self updateDownloadProgress];
 		}
@@ -684,7 +693,7 @@ static NSError *ASIUnableToCreateRequestError;
 			}
 		} else {
 			value = 1;
-			updatedProgress = YES;
+			[self setUpdatedProgress:YES];
 		}
 		
 		NSMethodSignature *signature = nil;
@@ -748,11 +757,11 @@ static NSError *ASIUnableToCreateRequestError;
 			NSAutoreleasePool *thePool = [[NSAutoreleasePool alloc] init];
 			
 			unsigned long long value = 0;
-			if (showAccurateProgress) {
-				value = bytesReadSoFar-lastBytesRead;
+			if ([self showAccurateProgress]) {
+				value = bytesReadSoFar-[self lastBytesRead];
 			} else {
 				value = 1;
-				updatedProgress = YES;
+				[self setUpdatedProgress:YES];
 			}
 			
 			
@@ -770,7 +779,7 @@ static NSError *ASIUnableToCreateRequestError;
 			[ASIHTTPRequest setProgress:(double)(1.0*bytesReadSoFar/(contentLength+partialDownloadSize)) forProgressIndicator:downloadProgressDelegate];
 		}
 		
-		lastBytesRead = bytesReadSoFar;
+		[self setLastBytesRead:bytesReadSoFar];
 	}
 	
 }
@@ -857,7 +866,7 @@ static NSError *ASIUnableToCreateRequestError;
 // If you do this, don't forget to call [super failWithError:] to let the queue / delegate know we're done
 - (void)failWithError:(NSError *)theError
 {
-	complete = YES;
+	[self setComplete:YES];
 	
 	if ([self isCancelled]) {
 		return;
@@ -915,12 +924,12 @@ static NSError *ASIUnableToCreateRequestError;
 			// See if we got a Content-length header
 			NSString *cLength = [responseHeaders valueForKey:@"Content-Length"];
 			if (cLength) {
-				contentLength = CFStringGetIntValue((CFStringRef)cLength);
-				if (mainRequest) {
-					[mainRequest setContentLength:contentLength];
+				[self setContentLength:CFStringGetIntValue((CFStringRef)cLength)];
+				if ([self mainRequest]) {
+					[[self mainRequest] setContentLength:contentLength];
 				}
-				if (showAccurateProgress && shouldResetProgressIndicators) {
-					[self resetDownloadProgress:contentLength+partialDownloadSize];
+				if ([self showAccurateProgress] && [self shouldResetProgressIndicators]) {
+					[self resetDownloadProgress:[self contentLength]+[self partialDownloadSize]];
 				}
 			}
 			
@@ -996,8 +1005,8 @@ static NSError *ASIUnableToCreateRequestError;
 
 - (BOOL)applyCredentials:(NSMutableDictionary *)newCredentials
 {
-	authenticationRetryCount++;
-
+	[self setAuthenticationRetryCount:[self authenticationRetryCount]+1];
+	
 	if (newCredentials && requestAuthentication && request) {
 		// Apply whatever credentials we've built up to the old request
 		if (CFHTTPMessageApplyCredentialDictionary(request, requestAuthentication, (CFMutableDictionaryRef)newCredentials, NULL)) {
@@ -1115,14 +1124,13 @@ static NSError *ASIUnableToCreateRequestError;
 			
 			[self setRequestCredentials:nil];
 			
-			ignoreError = YES;	
 			[self setLastActivityTime:nil];
 			
 			// If we have a delegate, we'll see if it can handle authorizationNeededForRequest.
 			// Otherwise, we'll try the queue (if this request is part of one) and it will pass the message on to its own delegate
-			id authorizationDelegate = delegate;
-			if (!delegate) {
-				authorizationDelegate = queue;
+			id authorizationDelegate = [self delegate];
+			if (!authorizationDelegate) {
+				authorizationDelegate = [self queue];
 			}
 			
 			if ([authorizationDelegate respondsToSelector:@selector(authorizationNeededForRequest:)]) {
@@ -1171,13 +1179,11 @@ static NSError *ASIUnableToCreateRequestError;
 		}
 		
 		// We've got no credentials, let's ask the delegate to sort this out
-		ignoreError = YES;	
-		
 		// If we have a delegate, we'll see if it can handle authorizationNeededForRequest.
 		// Otherwise, we'll try the queue (if this request is part of one) and it will pass the message on to its own delegate
-		id authorizationDelegate = delegate;
-		if (!delegate) {
-			authorizationDelegate = queue;
+		id authorizationDelegate = [self delegate];
+		if (!authorizationDelegate) {
+			authorizationDelegate = [self queue];
 		}
 		
 		if ([authorizationDelegate respondsToSelector:@selector(authorizationNeededForRequest:)]) {
@@ -1223,7 +1229,7 @@ static NSError *ASIUnableToCreateRequestError;
 - (void)handleBytesAvailable
 {
 	
-	if (!responseHeaders) {
+	if (![self responseHeaders]) {
 		if ([self readResponseHeadersReturningAuthenticationFailure]) {
 			[self attemptToApplyCredentialsAndResume];
 			return;
@@ -1247,11 +1253,11 @@ static NSError *ASIUnableToCreateRequestError;
 		// If zero bytes were read, wait for the EOF to come.
     } else if (bytesRead) {
 		
-		totalBytesRead += bytesRead;
+		[self setTotalBytesRead:[self totalBytesRead]+bytesRead];
 		
 		// Are we downloading to a file?
-		if (downloadDestinationPath) {
-			if (!outputStream) {
+		if ([self downloadDestinationPath]) {
+			if (![self fileDownloadOutputStream]) {
 				BOOL append = NO;
 				if (![self temporaryFileDownloadPath]) {
 					[self setTemporaryFileDownloadPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]]];
@@ -1259,10 +1265,10 @@ static NSError *ASIUnableToCreateRequestError;
 					append = YES;
 				}
 				
-				outputStream = [[NSOutputStream alloc] initToFileAtPath:temporaryFileDownloadPath append:append];
-				[outputStream open];
+				[self setFileDownloadOutputStream:[[[NSOutputStream alloc] initToFileAtPath:temporaryFileDownloadPath append:append] autorelease]];
+				[fileDownloadOutputStream open];
 			}
-			[outputStream write:buffer maxLength:bytesRead];
+			[fileDownloadOutputStream write:buffer maxLength:bytesRead];
 			
 			//Otherwise, let's add the data to our in-memory store
 		} else {
@@ -1274,14 +1280,14 @@ static NSError *ASIUnableToCreateRequestError;
 - (void)handleStreamComplete
 {
 	//Try to read the headers (if this is a HEAD request handleBytesAvailable available may not be called)
-	if (!responseHeaders) {
+	if (![self responseHeaders]) {
 		if ([self readResponseHeadersReturningAuthenticationFailure]) {
 			[self attemptToApplyCredentialsAndResume];
 			return;
 		}
 	}
 	[progressLock lock];	
-	complete = YES;
+	[self setComplete:YES];
 	[self updateProgressIndicators];
 	
     if (readStream) {
@@ -1301,7 +1307,7 @@ static NSError *ASIUnableToCreateRequestError;
 	
 	// Close the output stream as we're done writing to the file
 	if (temporaryFileDownloadPath) {
-		[outputStream close];
+		[fileDownloadOutputStream close];
 		
 		// Decompress the file (if necessary) directly to the destination path
 		if ([self isResponseCompressed]) {
@@ -1345,9 +1351,9 @@ static NSError *ASIUnableToCreateRequestError;
 	NSError *underlyingError = [(NSError *)CFReadStreamCopyError(readStream) autorelease];
 	
 	[self cancelLoad];
-	complete = YES;
+	[self setComplete:YES];
 	
-	if (!error) { // We may already have handled this error
+	if (![self error]) { // We may already have handled this error
 		
 		[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIConnectionFailureErrorType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"A connection failure occurred",NSLocalizedDescriptionKey,underlyingError,NSUnderlyingErrorKey,nil]]];
 	}
@@ -1625,5 +1631,13 @@ static NSError *ASIUnableToCreateRequestError;
 @synthesize postBodyReadStream;
 @synthesize shouldStreamPostDataFromDisk;
 @synthesize didCreateTemporaryPostDataFile;
-@synthesize HTTPVersionOne;
+@synthesize useHTTPVersionOne;
+@synthesize lastBytesRead;
+@synthesize lastBytesSent;
+@synthesize cancelledLock;
+@synthesize haveBuiltPostBody;
+@synthesize fileDownloadOutputStream;
+@synthesize authenticationRetryCount;
+@synthesize updatedProgress;
+@synthesize shouldRedirect;
 @end

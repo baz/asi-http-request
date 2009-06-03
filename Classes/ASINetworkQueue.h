@@ -6,6 +6,7 @@
 //  Copyright 2008-2009 All-Seeing Interactive. All rights reserved.
 //
 
+#import <Foundation/Foundation.h>
 
 @interface ASINetworkQueue : NSOperationQueue {
 	
@@ -55,6 +56,9 @@
 
 	
 }
+
+// Convenience constructor
++ (id)queue;
 
 // Used internally to manage HEAD requests when showAccurateProgress is YES, do not use!
 - (void)addHEADOperation:(NSOperation *)operation;

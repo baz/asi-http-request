@@ -10,12 +10,13 @@
 //  Portions are based on the ImageClient example from Apple:
 //  See: http://developer.apple.com/samplecode/ImageClient/listing37.html
 
-
+#import <Foundation/Foundation.h>
 // Dammit, importing frameworks when you are targetting two platforms is a PITA
 #if TARGET_OS_IPHONE
 	#import <CFNetwork/CFNetwork.h>
 #endif
 #import <stdio.h>
+
 
 typedef enum _ASINetworkErrorType {
     ASIConnectionFailureErrorType = 1,
@@ -29,6 +30,8 @@ typedef enum _ASINetworkErrorType {
 	
 } ASINetworkErrorType;
 
+extern NSString* const NetworkRequestErrorDomain;
+
 @interface ASIHTTPRequest : NSOperation {
 	
 	// The url for this operation, should include GET params in the query string where appropriate
@@ -37,7 +40,7 @@ typedef enum _ASINetworkErrorType {
 	// The delegate, you need to manage setting and talking to your delegate in your subclasses
 	id delegate;
 	
-	// A queue delegate that should *ALSO* be notified of delegate message
+	// A queue delegate that should *ALSO* be notified of delegate message (used by ASINetworkQueue)
 	id queue;
 	
 	// HTTP method to use (GET / POST / PUT / DELETE). Defaults to GET
@@ -95,7 +98,7 @@ typedef enum _ASINetworkErrorType {
 	NSString *temporaryFileDownloadPath;
 	
 	// Used for writing data to a file when downloadDestinationPath is set
-	NSOutputStream *outputStream;
+	NSOutputStream *fileDownloadOutputStream;
 	
 	// When the request fails or completes successfully, complete will be true
 	BOOL complete;
@@ -103,9 +106,6 @@ typedef enum _ASINetworkErrorType {
 	// If an error occurs, error will contain an NSError
 	// If error code is = ASIConnectionFailureErrorType (1, Connection failure occurred) - inspect [[error userInfo] objectForKey:NSUnderlyingErrorKey] for more information
 	NSError *error;
-	
-	// If an authentication error occurs, we give the delegate a chance to handle it, ignoreError will be set to true
-	BOOL ignoreError;
 	
 	// Username and password used for authentication
 	NSString *username;
@@ -212,7 +212,11 @@ typedef enum _ASINetworkErrorType {
 	// Custom user information assosiated with the request
 	NSDictionary *userInfo;
 	
-	BOOL HTTPVersionOne;
+	// Use HTTP 1.0 rather than 1.1 (defaults to false)
+	BOOL useHTTPVersionOne;
+	
+	// When YES, requests will automatically redirect when they get a HTTP 30x header (defaults to YES)
+	BOOL shouldRedirect;
 
 }
 
@@ -220,6 +224,9 @@ typedef enum _ASINetworkErrorType {
 
 // Should be an HTTP or HTTPS url, may include username and password if appropriate
 - (id)initWithURL:(NSURL *)newURL;
+
+// Convenience constructor
++ (id)requestWithURL:(NSURL *)newURL;
 
 #pragma mark setup request
 
@@ -365,37 +372,33 @@ typedef enum _ASINetworkErrorType {
 @property (retain,readonly) NSString *authenticationRealm;
 @property (retain) NSError *error;
 @property (assign,readonly) BOOL complete;
-@property (retain) NSDictionary *responseHeaders;
+@property (retain,readonly) NSDictionary *responseHeaders;
 @property (retain) NSMutableDictionary *requestHeaders;
 @property (retain) NSMutableArray *requestCookies;
-@property (retain) NSArray *responseCookies;
+@property (retain,readonly) NSArray *responseCookies;
 @property (assign) BOOL useCookiePersistance;
 @property (retain) NSDictionary *requestCredentials;
-@property (assign) int responseStatusCode;
-@property (retain) NSMutableData *rawResponseData;
-@property (retain) NSDate *lastActivityTime;
+@property (assign,readonly) int responseStatusCode;
+@property (retain,readonly) NSMutableData *rawResponseData;
 @property (assign) NSTimeInterval timeOutSeconds;
 @property (retain) NSString *requestMethod;
 @property (retain) NSMutableData *postBody;
-@property (assign) unsigned long long contentLength;
-@property (assign) unsigned long long partialDownloadSize;
+@property (assign,readonly) unsigned long long contentLength;
 @property (assign) unsigned long long postLength;
 @property (assign) BOOL shouldResetProgressIndicators;
 @property (retain) ASIHTTPRequest *mainRequest;
 @property (assign) BOOL showAccurateProgress;
 @property (assign,readonly) unsigned long long totalBytesRead;
 @property (assign,readonly) unsigned long long totalBytesSent;
-@property (assign) unsigned long long uploadBufferSize;
 @property (assign) NSStringEncoding defaultResponseEncoding;
-@property (assign) NSStringEncoding responseEncoding;
+@property (assign,readonly) NSStringEncoding responseEncoding;
 @property (assign) BOOL allowCompressedResponse;
 @property (assign) BOOL allowResumeForFileDownloads;
 @property (retain) NSDictionary *userInfo;
 @property (retain) NSString *postBodyFilePath;
-@property (retain) NSOutputStream *postBodyWriteStream;
-@property (retain) NSInputStream *postBodyReadStream;
 @property (assign) BOOL shouldStreamPostDataFromDisk;
 @property (assign) BOOL didCreateTemporaryPostDataFile;
-@property (assign) BOOL HTTPVersionOne;
-
+@property (assign) BOOL useHTTPVersionOne;
+@property (assign, readonly) unsigned long long partialDownloadSize;
+@property (assign) BOOL shouldRedirect;
 @end
