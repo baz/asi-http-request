@@ -218,6 +218,10 @@ extern NSString* const NetworkRequestErrorDomain;
 	// When YES, requests will automatically redirect when they get a HTTP 30x header (defaults to YES)
 	BOOL shouldRedirect;
 
+	// A list of any other additional stream properties to be set
+	// Key holds the stream property name, and value holds the allowed data type for the corresponding property
+	NSDictionary *streamProperties;
+
 }
 
 #pragma mark init / dealloc
@@ -401,4 +405,5 @@ extern NSString* const NetworkRequestErrorDomain;
 @property (assign) BOOL useHTTPVersionOne;
 @property (assign, readonly) unsigned long long partialDownloadSize;
 @property (assign) BOOL shouldRedirect;
+@property (retain) NSDictionary *streamProperties;
 @end

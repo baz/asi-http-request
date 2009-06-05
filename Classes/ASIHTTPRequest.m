@@ -145,6 +145,7 @@ static NSError *ASIUnableToCreateRequestError;
 	[postBodyFilePath release];
 	[postBodyWriteStream release];
 	[postBodyReadStream release];
+	[streamProperties release];
 	[super dealloc];
 }
 
@@ -433,6 +434,10 @@ static NSError *ASIUnableToCreateRequestError;
 	
 	// Tell CFNetwork to automatically redirect for 30x status codes
 	CFReadStreamSetProperty(readStream, kCFStreamPropertyHTTPShouldAutoredirect, [self shouldRedirect] ? kCFBooleanTrue : kCFBooleanFalse);
+	// Set any other additional stream properties
+	for (NSString *key in streamProperties) {
+		CFReadStreamSetProperty(readStream, (CFStringRef)key, [streamProperties objectForKey:key]);
+	}
     
     // Set the client
 	CFStreamClientContext ctxt = {0, self, NULL, NULL, NULL};
@@ -1640,4 +1645,5 @@ static NSError *ASIUnableToCreateRequestError;
 @synthesize authenticationRetryCount;
 @synthesize updatedProgress;
 @synthesize shouldRedirect;
+@synthesize streamProperties;
 @end
