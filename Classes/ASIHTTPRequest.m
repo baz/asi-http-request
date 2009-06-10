@@ -97,6 +97,7 @@ static NSError *ASIUnableToCreateRequestError;
 	[self setTimeOutSeconds:10];
 	[self setUseSessionPersistance:YES];
 	[self setUseCookiePersistance:YES];
+	[self setValidatesSecureCertificate:YES];
 	[self setRequestCookies:[[[NSMutableArray alloc] init] autorelease]];
 	[self setDidFinishSelector:@selector(requestFinished:)];
 	[self setDidFailSelector:@selector(requestFailed:)];
@@ -439,6 +440,11 @@ static NSError *ASIUnableToCreateRequestError;
 		CFReadStreamSetProperty(readStream, (CFStringRef)key, [streamProperties objectForKey:key]);
 	}
     
+	// Tell CFNetwork not to validate SSL certificates
+	if (!validatesSecureCertificate) {
+		CFReadStreamSetProperty(readStream, kCFStreamPropertySSLSettings, [NSMutableDictionary dictionaryWithObject:(NSString *)kCFBooleanFalse forKey:(NSString *)kCFStreamSSLValidatesCertificateChain]); 
+	}
+	
     // Set the client
 	CFStreamClientContext ctxt = {0, self, NULL, NULL, NULL};
     if (!CFReadStreamSetClient(readStream, kNetworkEvents, ReadStreamClientCallBack, &ctxt)) {
@@ -1355,12 +1361,26 @@ static NSError *ASIUnableToCreateRequestError;
 {
 	NSError *underlyingError = [(NSError *)CFReadStreamCopyError(readStream) autorelease];
 	
+	
+	
 	[self cancelLoad];
 	[self setComplete:YES];
 	
 	if (![self error]) { // We may already have handled this error
 		
-		[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIConnectionFailureErrorType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"A connection failure occurred",NSLocalizedDescriptionKey,underlyingError,NSUnderlyingErrorKey,nil]]];
+		
+		NSString *reason = @"A connection failure occurred";
+		
+		// We'll use a custom error message for SSL errors, but you should always check underlying error if you want more details
+		// For some reason SecureTransport.h doesn't seem to be available on iphone, so error codes hard-coded
+		// Also, iPhone seems to handle errors differently from Mac OS X - a self-signed certificate returns a different error code on each platform, so we'll just provide a general error
+		if ([[underlyingError domain] isEqualToString:NSOSStatusErrorDomain]) {
+			if ([underlyingError code] <= -9800 && [underlyingError code] >= -9818) {
+				reason = [NSString stringWithFormat:@"%@: SSL problem (possibily a bad/expired/self-signed certificate)",reason];
+			}
+		}
+		
+		[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIConnectionFailureErrorType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:reason,NSLocalizedDescriptionKey,underlyingError,NSUnderlyingErrorKey,nil]]];
 	}
     [super cancel];
 }
@@ -1646,4 +1666,5 @@ static NSError *ASIUnableToCreateRequestError;
 @synthesize updatedProgress;
 @synthesize shouldRedirect;
 @synthesize streamProperties;
+@synthesize validatesSecureCertificate;
 @end

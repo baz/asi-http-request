@@ -217,6 +217,9 @@ extern NSString* const NetworkRequestErrorDomain;
 	
 	// When YES, requests will automatically redirect when they get a HTTP 30x header (defaults to YES)
 	BOOL shouldRedirect;
+	
+	// When NO, requests will not check the secure certificate is valid (use for self-signed cerficates during development, DO NOT USE IN PRODUCTION) Default is YES
+	BOOL validatesSecureCertificate;
 
 	// A list of any other additional stream properties to be set
 	// Key holds the stream property name, and value holds the allowed data type for the corresponding property
@@ -406,4 +409,5 @@ extern NSString* const NetworkRequestErrorDomain;
 @property (assign, readonly) unsigned long long partialDownloadSize;
 @property (assign) BOOL shouldRedirect;
 @property (retain) NSDictionary *streamProperties;
+@property (assign) BOOL validatesSecureCertificate;
 @end
