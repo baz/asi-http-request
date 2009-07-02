@@ -11,8 +11,10 @@
 //  See: http://developer.apple.com/samplecode/ImageClient/listing37.html
 
 #import "ASIHTTPRequest.h"
-#import "NSHTTPCookieAdditions.h"
 #import <zlib.h>
+#ifndef TARGET_OS_IPHONE
+#import <SystemConfiguration/SystemConfiguration.h>
+#endif
 
 // We use our own custom run loop mode as CoreAnimation seems to want to hijack our threads otherwise
 static CFStringRef ASIHTTPRequestRunMode = CFSTR("ASIHTTPRequest");
@@ -346,9 +348,9 @@ static NSError *ASIUnableToCreateRequestError;
 		NSString *cookieHeader = nil;
 		for (cookie in cookies) {
 			if (!cookieHeader) {
-				cookieHeader = [NSString stringWithFormat: @"%@=%@",[cookie name],[cookie encodedValue]];
+				cookieHeader = [NSString stringWithFormat: @"%@=%@",[cookie name],[cookie value]];
 			} else {
-				cookieHeader = [NSString stringWithFormat: @"%@; %@=%@",cookieHeader,[cookie name],[cookie encodedValue]];
+				cookieHeader = [NSString stringWithFormat: @"%@; %@=%@",cookieHeader,[cookie name],[cookie value]];
 			}
 		}
 		if (cookieHeader) {
@@ -447,6 +449,23 @@ static NSError *ASIUnableToCreateRequestError;
 	if (!validatesSecureCertificate) {
 		CFReadStreamSetProperty(readStream, kCFStreamPropertySSLSettings, [NSMutableDictionary dictionaryWithObject:(NSString *)kCFBooleanFalse forKey:(NSString *)kCFStreamSSLValidatesCertificateChain]); 
 	}
+	
+	// Detect proxy settings and apply them
+#if TARGET_OS_IPHONE
+	#if TARGET_IPHONE_SIMULATOR
+		#if __IPHONE_OS_VERSION_MIN_REQUIRED > __IPHONE_2_2
+	NSDictionary *proxySettings = [(NSDictionary *)CFNetworkCopySystemProxySettings() autorelease];
+		#else
+	// Can't detect proxies in 2.2.1 Simulator
+	NSDictionary *proxySettings = [NSMutableDictionary dictionary];	
+		#endif
+	#else
+	NSDictionary *proxySettings = [(NSDictionary *)CFNetworkCopySystemProxySettings() autorelease];
+	#endif
+#else
+	NSDictionary *proxySettings = [(NSDictionary *)SCDynamicStoreCopyProxies(NULL) autorelease];
+#endif
+	CFReadStreamSetProperty(readStream, kCFStreamPropertyHTTPProxy, proxySettings);
 	
     // Set the client
 	CFStreamClientContext ctxt = {0, self, NULL, NULL, NULL};
@@ -973,14 +992,7 @@ static NSError *ASIUnableToCreateRequestError;
 			[self setResponseEncoding:encoding];
 			
 			// Handle cookies
-			NSArray *cookies = [NSHTTPCookie cookiesWithResponseHeaderFields:responseHeaders forURL:url];
-			NSMutableArray *newCookies = [[[NSMutableArray alloc] init] autorelease];
-			for (NSHTTPCookie *cookie in cookies) {
-				NSMutableDictionary *properties = [[[NSMutableDictionary alloc] initWithDictionary:[cookie properties]] autorelease];
-				[properties setValue:[cookie decodedValue] forKey:NSHTTPCookieValue];
-				[newCookies addObject:[NSHTTPCookie cookieWithProperties:properties]];
-			}
-
+			NSArray *newCookies = [NSHTTPCookie cookiesWithResponseHeaderFields:responseHeaders forURL:url];
 			[self setResponseCookies:newCookies];
 			
 			if (useCookiePersistance) {
