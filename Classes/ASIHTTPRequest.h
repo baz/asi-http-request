@@ -26,7 +26,8 @@ typedef enum _ASINetworkErrorType {
     ASIUnableToCreateRequestErrorType = 5,
     ASIInternalErrorWhileBuildingRequestType  = 6,
     ASIInternalErrorWhileApplyingCredentialsType  = 7,
-	ASIFileManagementError = 8
+	ASIFileManagementError = 8,
+	ASITooMuchRedirectionErrorType = 9
 	
 } ASINetworkErrorType;
 
@@ -43,11 +44,14 @@ extern NSString* const NetworkRequestErrorDomain;
 	// A queue delegate that should *ALSO* be notified of delegate message (used by ASINetworkQueue)
 	id queue;
 	
-	// HTTP method to use (GET / POST / PUT / DELETE). Defaults to GET
+	// HTTP method to use (GET / POST / PUT / DELETE / HEAD). Defaults to GET
 	NSString *requestMethod;
 	
 	// Request body - only used when the whole body is stored in memory (shouldStreamPostDataFromDisk is false)
 	NSMutableData *postBody;
+	
+	// gzipped request body used when shouldCompressRequestBody is YES
+	NSData *compressedPostBody;
 	
 	// When true, post body will be streamed from a file on disk, rather than loaded into memory at once (useful for large uploads)
 	// Automatically set to true in ASIFormDataRequests when using setFile:forKey:
@@ -56,6 +60,9 @@ extern NSString* const NetworkRequestErrorDomain;
 	// Path to file used to store post body (when shouldStreamPostDataFromDisk is true)
 	// You can set this yourself - useful if you want to PUT a file from local disk 
 	NSString *postBodyFilePath;
+	
+	// Path to a temporary file used to store a deflated post body (when shouldCompressPostBody is YES)
+	NSString *compressedPostBodyFilePath;
 	
 	// Set to true when ASIHTTPRequest automatically created a temporary file containing the request body (when true, the file at postBodyFilePath will be deleted at the end of the request)
 	BOOL didCreateTemporaryPostDataFile;
@@ -89,6 +96,10 @@ extern NSString* const NetworkRequestErrorDomain;
 	
 	// If allowCompressedResponse is true, requests will inform the server they can accept compressed data, and will automatically decompress gzipped responses. Default is true.
 	BOOL allowCompressedResponse;
+	
+	// If shouldCompressRequestBody is true, the request body will be gzipped. Default is false.
+	// You will probably need to enable this feature on your webserver to make this work. Tested with apache only.
+	BOOL shouldCompressRequestBody;
 	
 	// When downloadDestinationPath is set, the result of this request will be downloaded to the file at this location
 	// If downloadDestinationPath is not set, download data will be stored in memory
@@ -202,11 +213,18 @@ extern NSString* const NetworkRequestErrorDomain;
 	// Prevents the body of the post being built more than once (largely for subclasses)
 	BOOL haveBuiltPostBody;
 	
+	// Used internally, may reflect the size of the internal used by CFNetwork
+	// POST / PUT operations with body sizes greater than uploadBufferSize will not timeout unless more than uploadBufferSize bytes have been sent
+	// Likely to be 32KB on iPhone 3.0, 128KB on Mac OS X Leopard and iPhone 2.2.x
 	unsigned long long uploadBufferSize;
 	
+	// Text encoding for responses that do not send a Content-Type with a charset value. Defaults to NSISOLatin1StringEncoding
 	NSStringEncoding defaultResponseEncoding;
+	
+	// The text encoding of the response, will be defaultResponseEncoding if the server didn't specify. Can't be set.
 	NSStringEncoding responseEncoding;
 	
+	// Tells ASIHTTPRequest not to delete partial downloads, and allows it to use an existing file to resume a download. Defaults to NO.
 	BOOL allowResumeForFileDownloads;
 	
 	// Custom user information assosiated with the request
@@ -217,6 +235,12 @@ extern NSString* const NetworkRequestErrorDomain;
 	
 	// When YES, requests will automatically redirect when they get a HTTP 30x header (defaults to YES)
 	BOOL shouldRedirect;
+	
+	// Used internally to tell the main loop we need to stop and retry with a new url
+	BOOL needsRedirect;
+	
+	// Incremented every time this request redirects. When it reaches 5, we give up
+	int redirectCount;
 	
 	// When NO, requests will not check the secure certificate is valid (use for self-signed cerficates during development, DO NOT USE IN PRODUCTION) Default is YES
 	BOOL validatesSecureCertificate;
@@ -301,7 +325,9 @@ extern NSString* const NetworkRequestErrorDomain;
 
 #pragma mark http authentication stuff
 
-// Reads the response headers to find the content length, and returns true if the request needs a username and password (or if those supplied were incorrect)
+// Reads the response headers to find the content length, encoding, cookies for the session 
+// Also initiates request redirection when shouldRedirect is true
+// Returns true if the request needs a username and password (or if those supplied were incorrect)
 - (BOOL)readResponseHeadersReturningAuthenticationFailure;
 
 // Apply credentials to this request
@@ -349,10 +375,13 @@ extern NSString* const NetworkRequestErrorDomain;
 + (void)setSessionCookies:(NSMutableArray *)newSessionCookies;
 + (NSMutableArray *)sessionCookies;
 
+// Adds a cookie to our list of cookies we've accepted, checking first for an old version of the same cookie and removing that
++ (void)addSessionCookie:(NSHTTPCookie *)newCookie;
+
 // Dump all session data (authentication and cookies)
 + (void)clearSession;
 
-#pragma mark gzip compression
+#pragma mark gzip decompression
 
 // Uncompress gzipped data with zlib
 + (NSData *)uncompressZippedData:(NSData*)compressedData;
@@ -360,6 +389,15 @@ extern NSString* const NetworkRequestErrorDomain;
 // Uncompress gzipped data from a file into another file, used when downloading to a file
 + (int)uncompressZippedDataFromFile:(NSString *)sourcePath toFile:(NSString *)destinationPath;
 + (int)uncompressZippedDataFromSource:(FILE *)source toDestination:(FILE *)dest;
+
+#pragma mark gzip compression
+
+// Compress data with gzip using zlib
++ (NSData *)compressData:(NSData*)uncompressedData;
+
+// gzip compress data from a file, saving to another file, used for uploading when shouldCompressRequestBody is true
++ (int)compressDataFromFile:(NSString *)sourcePath toFile:(NSString *)destinationPath;
++ (int)compressDataFromSource:(FILE *)source toDestination:(FILE *)dest;
 
 @property (retain) NSString *username;
 @property (retain) NSString *password;
@@ -410,4 +448,5 @@ extern NSString* const NetworkRequestErrorDomain;
 @property (assign) BOOL shouldRedirect;
 @property (retain) NSDictionary *streamProperties;
 @property (assign) BOOL validatesSecureCertificate;
+@property (assign) BOOL shouldCompressRequestBody;
 @end

@@ -33,4 +33,11 @@
 - (void)testCompressedResponse;
 - (void)testCompressedResponseDownloadToFile;
 - (void)testSSL;
+- (void)testRedirectPreservesSession;
+- (void)testTooMuchRedirection;
+- (void)testRedirectToNewDomain;
+- (void)test303Redirect;
+- (void)testCompression;
+- (void)testSubclass;
+
 @end

@@ -10,7 +10,13 @@
 #import "ASIHTTPRequest.h"
 #import "ASINSStringAdditions.h"
 #import "ASINetworkQueue.h"
+#import "ASIFormDataRequest.h"
 
+// Used for subclass test
+@interface ASIHTTPRequestSubclass : ASIHTTPRequest {}
+@end
+@implementation ASIHTTPRequestSubclass;
+@end
 
 @implementation ASIHTTPRequestTests
 
@@ -639,4 +645,105 @@
 	GHAssertNil([request error],@"Failed to accept a self-signed certificate");	
 }
 
+- (void)testRedirectPreservesSession
+{
+	// Remove any old session cookies
+	[ASIHTTPRequest clearSession];
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/session_redirect"]];
+	[request start];
+	BOOL success = [[request responseString] isEqualToString:@"Take me to your leader"];
+	GHAssertTrue(success,@"Failed to redirect preserving session cookies");	
+}
+
+- (void)testTooMuchRedirection
+{
+	// This url will simply send a 302 redirect back to itself
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/one_infinite_loop"]];
+	[request start];
+	GHAssertNotNil([request error],@"Failed to generate an error when redirection occurs too many times");
+	BOOL success = ([[request error] code] == ASITooMuchRedirectionErrorType);
+	GHAssertTrue(success,@"Generated the wrong error for a redirection loop");		
+}
+
+- (void)testRedirectToNewDomain
+{
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/redirect_to_new_domain"]];
+	[request start];
+	BOOL success = [[[request url] absoluteString] isEqualToString:@"http://www.apple.com/"];
+	GHAssertTrue(success,@"Failed to redirect to a different domain");		
+}
+
+// Ensure request method changes to get
+- (void)test303Redirect
+{
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/redirect_303"]];
+	[request setRequestMethod:@"PUT"];
+	[request appendPostData:[@"Fuzzy" dataUsingEncoding:NSUTF8StringEncoding]];
+	[request start];
+	BOOL success = [[[request url] absoluteString] isEqualToString:@"http://allseeing-i.com/ASIHTTPRequest/tests/request-method"];
+	GHAssertTrue(success,@"Failed to redirect to correct location");
+	success = [[request responseString] isEqualToString:@"GET"];
+	GHAssertTrue(success,@"Failed to use GET on new URL");
+}
+
+- (void)testCompression
+{
+	NSString *content = @"This is the test content. This is the test content. This is the test content. This is the test content.";
+	
+	// Test in memory compression / decompression
+	NSData *data = [content dataUsingEncoding:NSUTF8StringEncoding];
+	NSData *compressedData = [ASIHTTPRequest compressData:data];
+	NSData *uncompressedData = [ASIHTTPRequest uncompressZippedData:compressedData];
+	NSString *newContent = [[[NSString alloc] initWithBytes:[uncompressedData bytes] length:[uncompressedData length] encoding:NSUTF8StringEncoding] autorelease];
+	
+	BOOL success = [newContent isEqualToString:content];
+	GHAssertTrue(success,@"Failed compress or decompress the correct data");	
+	
+	// Test file to file compression / decompression
+	NSString *basePath = [[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent];
+	NSString *sourcePath = [basePath stringByAppendingPathComponent:@"text.txt"];
+	NSString *destPath = [basePath stringByAppendingPathComponent:@"text.txt.compressed"];
+	NSString *newPath = [basePath stringByAppendingPathComponent:@"text2.txt"];
+	
+	[content writeToFile:sourcePath atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+	[ASIHTTPRequest compressDataFromFile:sourcePath toFile:destPath];
+	[ASIHTTPRequest uncompressZippedDataFromFile:destPath toFile:newPath];
+	success = [[NSString stringWithContentsOfFile:newPath encoding:NSUTF8StringEncoding error:NULL] isEqualToString:content];
+	GHAssertTrue(success,@"Failed compress or decompress the correct data");
+	
+	// Test compressed body
+	// Body is deflated by ASIHTTPRequest, sent, inflated by the server, printed, deflated by mod_deflate, response is inflated by ASIHTTPRequest
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://asi/ASIHTTPRequest/tests/compressed_post_body"]];
+	[request setRequestMethod:@"PUT"];
+	[request setShouldCompressRequestBody:YES];
+	[request appendPostData:data];
+	[request start];
+	
+	success = [[request responseString] isEqualToString:content];
+	GHAssertTrue(success,@"Failed to compress the body, or server failed to decompress it");	
+	
+	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/compressed_post_body"]];
+	[request setRequestMethod:@"PUT"];
+	[request setShouldCompressRequestBody:YES];
+	[request setShouldStreamPostDataFromDisk:YES];
+	[request setUploadProgressDelegate:self];
+	[request setPostBodyFilePath:sourcePath];
+	[request start];
+
+	success = [[request responseString] isEqualToString:content];
+	GHAssertTrue(success,@"Failed to compress the body, or server failed to decompress it");		
+	
+}
+
+
+// Ensure class convenience constructor returns an instance of our subclass
+- (void)testSubclass
+{
+	ASIHTTPRequestSubclass *instance = [ASIHTTPRequestSubclass requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com"]];
+	BOOL success = [instance isKindOfClass:[ASIHTTPRequestSubclass class]];
+	GHAssertTrue(success,@"Convenience constructor failed to return an instance of the correct class");	
+}
+
 @end
+
+
