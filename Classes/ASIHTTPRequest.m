@@ -289,7 +289,6 @@ static NSError *ASITooMuchRedirectionError;
 	[super cancel];
 	[self cancelLoad];
 	[self setComplete:YES];
-
 }
 
 
@@ -328,12 +327,16 @@ static NSError *ASITooMuchRedirectionError;
 	
 	[pool release];
 	pool = [[NSAutoreleasePool alloc] init];
+
+	if ([self complete]) {
+		return;
+	}
 	
 	[self setComplete:NO];
 	
 	if (![self url]) {
 		[self failWithError:ASIUnableToCreateRequestError];
-		return;		
+		return;
 	}
 	
 	if (![self haveBuiltPostBody]) {
