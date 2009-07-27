@@ -11,14 +11,21 @@
 #import "ASINetworkQueue.h"
 #import "ASIFormDataRequest.h"
 
+/*
+IMPORTANT
+Code that appears in these tests is not for general purpose use. 
+You should not use [networkQueue waitUntilAllOperationsAreFinished] or [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]] in your own software.
+They are used here to force a queue to operate synchronously to simplify writing the tests.
+IMPORTANT
+*/
+
 // Used for subclass test
 @interface ASINetworkQueueSubclass : ASINetworkQueue {}
 @end
-@implementation ASINetworkQueueSubclass;
+@implementation ASINetworkQueueSubclass
 @end
 
 @implementation ASINetworkQueueTests
-
 
 - (void)testProgress
 {
@@ -47,7 +54,7 @@
 	[networkQueue go];
 		
 	 while (!complete) {
-		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1]];
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 	 }
 	
 	BOOL success = (progress > 0.95);
@@ -98,7 +105,7 @@
 	int i;
 	for (i=0; i<3; i++) {
 		NSData *data = [[[NSMutableData alloc] initWithLength:fileSizes[i]*1024] autorelease];
-		NSString *path = [[[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent] stringByAppendingPathComponent:[NSString stringWithFormat:@"file%hi",i]];
+		NSString *path = [[self filePathForTemporaryTestFiles] stringByAppendingPathComponent:[NSString stringWithFormat:@"file%hi",i]];
 		[data writeToFile:path atomically:NO];
 		ASIFormDataRequest *request = [[[ASIFormDataRequest alloc] initWithURL:url] autorelease];
 		[request setFile:path forKey:@"file"];
@@ -108,7 +115,7 @@
 	[networkQueue go];
 	
 	while (!complete) {
-		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1]];
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 	}
 	
 	BOOL success = (progress > 0.95);
@@ -122,7 +129,7 @@
 	
 	for (i=0; i<3; i++) {
 		NSData *data = [[[NSMutableData alloc] initWithLength:fileSizes[i]*1024] autorelease];
-		NSString *path = [[[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent] stringByAppendingPathComponent:[NSString stringWithFormat:@"file%hi",i]];
+		NSString *path = [[self filePathForTemporaryTestFiles] stringByAppendingPathComponent:[NSString stringWithFormat:@"file%hi",i]];
 		[data writeToFile:path atomically:NO];
 		ASIFormDataRequest *request = [[[ASIFormDataRequest alloc] initWithURL:url] autorelease];
 		[request setFile:path forKey:@"file"];
@@ -132,7 +139,7 @@
 	[networkQueue go];
 	
 	while (!complete) {
-		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1]];
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 	}
 	
 	success = (progress > 0.95);
@@ -295,7 +302,7 @@
 	
 
 	while (!complete) {
-		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1]];
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 	}
 
 	NSError *error = [request error];
@@ -317,7 +324,7 @@
 	[networkQueue go];
 	
 	while (!complete) {
-		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1]];
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 	}
 	
 	error = [request error];
@@ -360,6 +367,9 @@
 	[networkQueue go];
 	[networkQueue waitUntilAllOperationsAreFinished];
     
+	// Give the queue time to notify us
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
+	
 	// This test may fail if you are using a proxy and it returns a page when you try to connect to a bad port.
 	GHAssertTrue(!request_succeeded && request_didfail,@"Request to resource without listener succeeded but should have failed");
     
@@ -370,12 +380,12 @@
 	complete = NO;
 	progress = 0;
 	
-	NSString *temporaryPath = [[[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"MemexTrails_1.0b1.zip.download"];
+	NSString *temporaryPath = [[self filePathForTemporaryTestFiles] stringByAppendingPathComponent:@"MemexTrails_1.0b1.zip.download"];
 	if ([[NSFileManager defaultManager] fileExistsAtPath:temporaryPath]) {
 		[[NSFileManager defaultManager] removeItemAtPath:temporaryPath error:nil];
 	}
 	
-	NSString *downloadPath = [[[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"MemexTrails_1.0b1.zip"];
+	NSString *downloadPath = [[self filePathForTemporaryTestFiles] stringByAppendingPathComponent:@"MemexTrails_1.0b1.zip"];
 	if ([[NSFileManager defaultManager] fileExistsAtPath:downloadPath]) {
 		[[NSFileManager defaultManager] removeItemAtPath:downloadPath error:nil];
 	}
@@ -394,7 +404,7 @@
 	NSTimer *timeoutTimer = [NSTimer scheduledTimerWithTimeInterval:5 target:self selector:@selector(stopQueue:) userInfo:nil repeats:NO];
 	
 	while (!complete) {
-		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1]];
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 	}
 	
 	// 5 seconds is up, let's tell the queue to stop
@@ -422,7 +432,7 @@
 	[networkQueue go];
 
 	while (!complete) {
-		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1]];
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 	}
 	
 	unsigned long long amountDownloaded = [[[NSFileManager defaultManager] fileAttributesAtPath:downloadPath traverseLink:NO] fileSize];
@@ -453,7 +463,7 @@
 	// Let the download run for 5 seconds
 	timeoutTimer = [NSTimer scheduledTimerWithTimeInterval:5 target:self selector:@selector(stopQueue:) userInfo:nil repeats:NO];
 	while (!complete) {
-		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1]];
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 	}
 	[networkQueue cancelAllOperations];
 	
@@ -484,7 +494,7 @@
 	[self setImmediateCancelQueue:[[[NSOperationQueue alloc] init] autorelease]];
 	int i;
 	for (i=0; i<100; i++) {
-		ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://asi"]];
+		ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com"]];
 		[request setDelegate:self];
 		[request setDidFailSelector:@selector(immediateCancelFail:)];
 		[request setDidFinishSelector:@selector(immediateCancelFinish:)];
@@ -530,8 +540,56 @@
 	BOOL success = [instance isKindOfClass:[ASINetworkQueueSubclass class]];
 	GHAssertTrue(success,@"Convenience constructor failed to return an instance of the correct class");	
 }
+
+
+// Test releasing the queue in a couple of ways - the purpose of these tests is really just to ensure we don't crash
+- (void)testQueueReleaseOnRequestComplete
+{
+	[[self releaseTestQueue] cancelAllOperations];
+	[self setReleaseTestQueue:[ASINetworkQueue queue]];
+	int i;
+	for (i=0; i<5; i++) {
+		ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com"]];
+		[request setDelegate:self];
+		[request setDidFailSelector:@selector(fail:)];
+		[request setDidFinishSelector:@selector(finish:)];
+		[[self releaseTestQueue] addOperation:request];
+	}
+}
+
+- (void)fail:(ASIHTTPRequest *)request
+{
+	if ([[self releaseTestQueue] requestsCount] == 0) {
+		[self setReleaseTestQueue:nil];
+	}
+}
  
+- (void)finish:(ASIHTTPRequest *)request
+{
+	if ([[self releaseTestQueue] requestsCount] == 0) {
+		[self setReleaseTestQueue:nil];
+	}	
+}
+
+- (void)testQueueReleaseOnQueueComplete
+{
+	[[self releaseTestQueue] cancelAllOperations];
+	[self setReleaseTestQueue:[ASINetworkQueue queue]];
+	[[self releaseTestQueue] setDelegate:self];
+	int i;
+	for (i=0; i<5; i++) {
+		ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com"]];
+		[[self releaseTestQueue] addOperation:request];
+	}
+}
+
+- (void)queueComplete:(ASINetworkQueue *)queue
+{
+	[self setReleaseTestQueue:nil];
+}
+
 @synthesize immediateCancelQueue;
 @synthesize failedRequests;
 @synthesize finishedRequests;
+@synthesize releaseTestQueue;
 @end

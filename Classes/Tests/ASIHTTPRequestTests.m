@@ -20,7 +20,6 @@
 
 @implementation ASIHTTPRequestTests
 
-
 - (void)testBasicDownload
 {
 	NSURL *url = [NSURL URLWithString:@"http://allseeing-i.com"];
@@ -132,6 +131,27 @@
 	GHAssertTrue(success,@"Wrong HTTP version used");	
 }
 
+- (void)testUserAgent
+{
+	// defaultUserAgentString will be nil if we haven't set a Bundle Name or Bundle Display Name
+	if ([ASIHTTPRequest defaultUserAgentString]) {
+		
+		// Returns the user agent it received in the response body
+		ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/user-agent"]];
+		[request start];
+		BOOL success = [[request responseString] isEqualToString:[ASIHTTPRequest defaultUserAgentString]];
+		GHAssertTrue(success,@"Failed to set the correct user agent");
+	}
+	
+	// Now test specifying a custom user agent
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/user-agent"]];
+	[request addRequestHeader:@"User-Agent" value:@"Ferdinand Fuzzworth's Magic Tent of Mystery"];
+	[request start];
+	BOOL success = [[request responseString] isEqualToString:@"Ferdinand Fuzzworth's Magic Tent of Mystery"];
+	GHAssertTrue(success,@"Failed to set the correct user agent");
+	
+}
+
 - (void)testAutomaticRedirection
 {
 	ASIHTTPRequest *request;
@@ -183,7 +203,7 @@
 
 - (void)testFileDownload
 {
-	NSString *path = [[[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"testimage.png"];
+	NSString *path = [[self filePathForTemporaryTestFiles] stringByAppendingPathComponent:@"testimage.png"];
 	
 	NSURL *url = [[[NSURL alloc] initWithString:@"http://allseeing-i.com/i/logo.png"] autorelease];
 	ASIHTTPRequest *request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
@@ -207,7 +227,7 @@
 
 - (void)testCompressedResponseDownloadToFile
 {
-	NSString *path = [[[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"testfile"];
+	NSString *path = [[self filePathForTemporaryTestFiles] stringByAppendingPathComponent:@"testfile"];
 	
 	NSURL *url = [[[NSURL alloc] initWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/first"] autorelease];
 	ASIHTTPRequest *request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
@@ -234,6 +254,9 @@
 	[request setDownloadProgressDelegate:self];
 	[request start];
 	
+	// Wait for the progress to catch up
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
+	
 	BOOL success = (progress > 0.95);
 	GHAssertTrue(success,@"Failed to properly increment download progress %f != 1.0",progress);	
 }
@@ -255,6 +278,9 @@
 	[request setUploadProgressDelegate:self];
 	[request start];
 	
+	// Wait for the progress to catch up
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
+	
 	BOOL success = (progress > 0.95);
 	GHAssertTrue(success,@"Failed to properly increment upload progress %f != 1.0",progress);	
 }
@@ -263,7 +289,7 @@
 {
 	NSURL *url = [NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/print_request_body"];
 	NSString *requestBody = @"This is the request body";
-	NSString *requestContentPath = [[[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"testfile.txt"];
+	NSString *requestContentPath = [[self filePathForTemporaryTestFiles] stringByAppendingPathComponent:@"testfile.txt"];
 	[[requestBody dataUsingEncoding:NSUTF8StringEncoding] writeToFile:requestContentPath atomically:NO];
 
 	
@@ -275,6 +301,9 @@
 	[request setUploadProgressDelegate:self];
 	[request setPostBodyFilePath:requestContentPath];
 	[request start];
+	
+	// Wait for the progress to catch up
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 	
 	BOOL success = (progress > 0.95);
 	GHAssertTrue(success,@"Failed to properly increment upload progress %f != 1.0",progress);
@@ -291,6 +320,9 @@
 	[request setUploadProgressDelegate:self];
 	[request appendPostDataFromFile:requestContentPath];
 	[request start];
+	
+	// Wait for the progress to catch up
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 	
 	success = (progress > 0.95);
 	GHAssertTrue(success,@"Failed to properly increment upload progress %f != 1.0",progress);
@@ -597,8 +629,8 @@
 
 - (void)testPartialFetch
 {
-	NSString *downloadPath = [[[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"testfile.txt"];
-	NSString *tempPath = [[[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"tempfile.txt"];
+	NSString *downloadPath = [[self filePathForTemporaryTestFiles] stringByAppendingPathComponent:@"testfile.txt"];
+	NSString *tempPath = [[self filePathForTemporaryTestFiles] stringByAppendingPathComponent:@"tempfile.txt"];
 	NSString *partialContent = @"This file should be exactly 163 bytes long when encoded as UTF8, Unix line breaks with no BOM.\n";
 	[partialContent writeToFile:tempPath atomically:NO encoding:NSASCIIStringEncoding error:nil];
 	
@@ -610,6 +642,7 @@
 	[request setAllowResumeForFileDownloads:YES];
 	[request setDownloadProgressDelegate:self];
 	[request start];
+	
 
 	
 	BOOL success = ([request contentLength] == 68);
@@ -620,6 +653,9 @@
 	NSString *newPartialContent = [content substringFromIndex:95];
 	success = ([newPartialContent isEqualToString:@"This is the content we ought to be getting if we start from byte 95."]);
 	GHAssertTrue(success,@"Failed to append the correct data to the end of the file?");
+
+	// Wait for the progress to catch up
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.25]];
 	
 	success = (progress > 0.95);
 	GHAssertTrue(success,@"Failed to correctly display increment progress for a partial download");
@@ -700,7 +736,8 @@
 	GHAssertTrue(success,@"Failed compress or decompress the correct data");	
 	
 	// Test file to file compression / decompression
-	NSString *basePath = [[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent];
+	
+	NSString *basePath = [self filePathForTemporaryTestFiles];
 	NSString *sourcePath = [basePath stringByAppendingPathComponent:@"text.txt"];
 	NSString *destPath = [basePath stringByAppendingPathComponent:@"text.txt.compressed"];
 	NSString *newPath = [basePath stringByAppendingPathComponent:@"text2.txt"];
@@ -713,7 +750,7 @@
 	
 	// Test compressed body
 	// Body is deflated by ASIHTTPRequest, sent, inflated by the server, printed, deflated by mod_deflate, response is inflated by ASIHTTPRequest
-	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://asi/ASIHTTPRequest/tests/compressed_post_body"]];
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/compressed_post_body"]];
 	[request setRequestMethod:@"PUT"];
 	[request setShouldCompressRequestBody:YES];
 	[request appendPostData:data];
@@ -743,6 +780,7 @@
 	BOOL success = [instance isKindOfClass:[ASIHTTPRequestSubclass class]];
 	GHAssertTrue(success,@"Convenience constructor failed to return an instance of the correct class");	
 }
+
 
 @end
 

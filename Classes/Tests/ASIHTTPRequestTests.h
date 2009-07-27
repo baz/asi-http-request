@@ -6,13 +6,9 @@
 //  Copyright 2008 All-Seeing Interactive. All rights reserved.
 //
 
-#if TARGET_OS_IPHONE
-	#import "GHUnit.h"
-#else
-	#import <GHUnit/GHUnit.h>
-#endif
+#import "ASITestCase.h"
 
-@interface ASIHTTPRequestTests : GHTestCase {
+@interface ASIHTTPRequestTests : ASITestCase {
 	float progress;
 }
 
@@ -20,6 +16,7 @@
 - (void)testTimeOut;
 - (void)testRequestMethod;
 - (void)testHTTPVersion;
+- (void)testUserAgent;
 - (void)testUploadContentLength;
 - (void)testDownloadContentLength;
 - (void)testFileDownload;

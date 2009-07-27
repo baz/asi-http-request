@@ -323,12 +323,14 @@ extern NSString* const NetworkRequestErrorDomain;
 // Called when a request fails, and lets the delegate now via didFailSelector
 - (void)failWithError:(NSError *)theError;
 
-#pragma mark http authentication stuff
+#pragma mark parsing HTTP response headers
 
 // Reads the response headers to find the content length, encoding, cookies for the session 
 // Also initiates request redirection when shouldRedirect is true
 // Returns true if the request needs a username and password (or if those supplied were incorrect)
 - (BOOL)readResponseHeadersReturningAuthenticationFailure;
+
+#pragma mark http authentication stuff
 
 // Apply credentials to this request
 - (BOOL)applyCredentials:(NSMutableDictionary *)newCredentials;
@@ -399,11 +401,17 @@ extern NSString* const NetworkRequestErrorDomain;
 + (int)compressDataFromFile:(NSString *)sourcePath toFile:(NSString *)destinationPath;
 + (int)compressDataFromSource:(FILE *)source toDestination:(FILE *)dest;
 
+#pragma mark get user agent
+
+// Will be used as a user agent if requests do not specify a custom user agent
+// Is only used when you have specified a Bundle Display Name (CFDisplayBundleName) or Bundle Name (CFBundleName) in your plist
++ (NSString *)defaultUserAgentString;
+
 @property (retain) NSString *username;
 @property (retain) NSString *password;
 @property (retain) NSString *domain;
 
-@property (retain,readonly) NSURL *url;
+@property (retain,setter=setURL:) NSURL *url;
 @property (assign) id delegate;
 @property (assign) id queue;
 @property (assign) id uploadProgressDelegate;

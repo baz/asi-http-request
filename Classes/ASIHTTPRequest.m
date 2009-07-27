@@ -46,7 +46,6 @@ static NSError *ASITooMuchRedirectionError;
 
 // Private stuff
 @interface ASIHTTPRequest ()
-	@property (retain,setter=setURL:) NSURL *url;
 	@property (assign) BOOL complete;
 	@property (retain) NSDictionary *responseHeaders;
 	@property (retain) NSArray *responseCookies;
@@ -207,8 +206,7 @@ static NSError *ASITooMuchRedirectionError;
 		}
 	}
 		
-	if ([self postLength] > 0) 
-	{
+	if ([self postLength] > 0) {
 		if (![requestMethod isEqualToString:@"POST"] && ![requestMethod isEqualToString:@"PUT"]) {
 			[self setRequestMethod:@"POST"];
 		}
@@ -343,8 +341,13 @@ static NSError *ASITooMuchRedirectionError;
 		[self buildPostBody];
 	}
 	
+	// If we're redirecting, we'll already have a CFHTTPMessageRef
+	if (request) {
+		CFRelease(request);
+	}
+	
     // Create a new HTTP request.
-	request = CFHTTPMessageCreateRequest(kCFAllocatorDefault, (CFStringRef)requestMethod, (CFURLRef)url, [self useHTTPVersionOne] ? kCFHTTPVersion1_0 : kCFHTTPVersion1_1);
+	request = CFHTTPMessageCreateRequest(kCFAllocatorDefault, (CFStringRef)[self requestMethod], (CFURLRef)[self url], [self useHTTPVersionOne] ? kCFHTTPVersion1_0 : kCFHTTPVersion1_1);
     if (!request) {
 		[self failWithError:ASIUnableToCreateRequestError];
 		return;
@@ -352,7 +355,7 @@ static NSError *ASITooMuchRedirectionError;
 	
 	
 	// If we've already talked to this server and have valid credentials, let's apply them to the request
-	if (useSessionPersistance && sessionCredentials && sessionAuthentication) {
+	if ([self useSessionPersistance] && sessionCredentials && sessionAuthentication) {
 		if (!CFHTTPMessageApplyCredentialDictionary(request, sessionAuthentication, (CFMutableDictionaryRef)sessionCredentials, NULL)) {
 			[ASIHTTPRequest setSessionAuthentication:NULL];
 			[ASIHTTPRequest setSessionCredentials:nil];
@@ -360,10 +363,10 @@ static NSError *ASITooMuchRedirectionError;
 	}
 	
 	// Add cookies from the persistant (mac os global) store
-	if (useCookiePersistance) {
-		NSArray *cookies = [[NSHTTPCookieStorage sharedHTTPCookieStorage] cookiesForURL:url];
+	if ([self useCookiePersistance] ) {
+		NSArray *cookies = [[NSHTTPCookieStorage sharedHTTPCookieStorage] cookiesForURL:[self url]];
 		if (cookies) {
-			[requestCookies addObjectsFromArray:cookies];
+			[[self requestCookies] addObjectsFromArray:cookies];
 		}
 	}
 	
@@ -389,6 +392,14 @@ static NSError *ASITooMuchRedirectionError;
 		}
 	}
 	
+	// Build and set the user agent string if the request does not already have a custom user agent specified
+	if (![[self requestHeaders] objectForKey:@"User-Agent"]) {
+		NSString *userAgentString = [ASIHTTPRequest defaultUserAgentString];
+		if (userAgentString) {
+			[self addRequestHeader:@"User-Agent" value:userAgentString];
+		}
+	}
+
 	
 	// Accept a compressed response
 	if ([self allowCompressedResponse]) {
@@ -403,7 +414,7 @@ static NSError *ASITooMuchRedirectionError;
 	// Should this request resume an existing download?
 	if ([self allowResumeForFileDownloads] && [self downloadDestinationPath] && [self temporaryFileDownloadPath] && [[NSFileManager defaultManager] fileExistsAtPath:[self temporaryFileDownloadPath]]) {
 		[self setPartialDownloadSize:[[[NSFileManager defaultManager] fileAttributesAtPath:[self temporaryFileDownloadPath] traverseLink:NO] fileSize]];
-		[self addRequestHeader:@"Range" value:[NSString stringWithFormat:@"bytes=%llu-",partialDownloadSize]];
+		[self addRequestHeader:@"Range" value:[NSString stringWithFormat:@"bytes=%llu-",[self partialDownloadSize]]];
 	}
 	
 	// Add custom headers
@@ -417,7 +428,7 @@ static NSError *ASITooMuchRedirectionError;
 	}	
 	NSString *header;
 	for (header in headers) {
-		CFHTTPMessageSetHeaderFieldValue(request, (CFStringRef)header, (CFStringRef)[requestHeaders objectForKey:header]);
+		CFHTTPMessageSetHeaderFieldValue(request, (CFStringRef)header, (CFStringRef)[[self requestHeaders] objectForKey:header]);
 	}
 
 	// If this is a post/put request and we store the request body in memory, add it to the request
@@ -603,9 +614,13 @@ static NSError *ASITooMuchRedirectionError;
 		}
 		
 		// Find out how much data we've uploaded so far
+		[[self cancelledLock] lock];
 		[self setTotalBytesSent:[[(NSNumber *)CFReadStreamCopyProperty(readStream, kCFStreamPropertyHTTPRequestBytesWrittenCount) autorelease] unsignedLongLongValue]];
-
+		[[self cancelledLock] unlock];
+		
 		[self updateProgressIndicators];
+		
+		
 		
 		// This thread should wait for 1/4 second for the stream to do something. We'll stop early if it does.
 		CFRunLoopRunInMode(ASIHTTPRequestRunMode,0.25,YES);
@@ -998,8 +1013,7 @@ static NSError *ASITooMuchRedirectionError;
 	}
 }
 
-
-#pragma mark http authentication
+#pragma mark parsing HTTP response headers
 
 - (BOOL)readResponseHeadersReturningAuthenticationFailure
 {
@@ -1081,6 +1095,11 @@ static NSError *ASITooMuchRedirectionError;
 					}
 					[self setURL:[[NSURL URLWithString:[responseHeaders valueForKey:@"Location"] relativeToURL:[self url]] absoluteURL]];
 					[self setNeedsRedirect:YES];
+					
+					// Clear the request cookies
+					// This means manually added cookies will not be added to the redirect request - only those stored in the global persistent store
+					// But, this is probably the safest option - we might be redirecting to a different domain
+					[self setRequestCookies:[NSMutableArray array]];
 				}
 			}
 			
@@ -1091,6 +1110,7 @@ static NSError *ASITooMuchRedirectionError;
 	return isAuthenticationChallenge;
 }
 
+#pragma mark http authentication
 
 - (void)saveCredentialsToKeychain:(NSMutableDictionary *)newCredentials
 {
@@ -1393,9 +1413,11 @@ static NSError *ASITooMuchRedirectionError;
 		return;
 	}
 	[progressLock lock];	
+	
 	[self setComplete:YES];
 	[self updateProgressIndicators];
 	
+	[[self cancelledLock] lock];
     if (readStream) {
         CFReadStreamClose(readStream);
         CFReadStreamSetClient(readStream, kCFStreamEventNone, NULL, NULL);
@@ -1445,7 +1467,9 @@ static NSError *ASITooMuchRedirectionError;
 			}
 		}
 	}
+	[[self cancelledLock] unlock];
 	[progressLock unlock];
+	
 	if (fileError) {
 		[self failWithError:fileError];
 	} else {
@@ -1852,6 +1876,53 @@ static NSError *ASITooMuchRedirectionError;
     (void)deflateEnd(&strm);
     return Z_OK;
 }
+
+#pragma mark get user agent
+
++ (NSString *)defaultUserAgentString
+{
+	NSBundle *bundle = [NSBundle mainBundle];
+	
+	// Attempt to find a name for this application
+	NSString *appName = [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"];
+	if (!appName) {
+		appName = [bundle objectForInfoDictionaryKey:@"CFBundleName"];	
+	}
+	// If we couldn't find one, we'll give up (and ASIHTTPRequest will use the standard CFNetwork user agent)
+	if (!appName) {
+		return nil;
+	}
+	NSString *appVersion = [bundle objectForInfoDictionaryKey:@"CFBundleVersion"];
+	NSString *deviceName;;
+	NSString *OSName;
+	NSString *OSVersion;
+	
+	NSString *locale = [[NSLocale currentLocale] localeIdentifier];
+	
+#if TARGET_OS_IPHONE
+	UIDevice *device = [UIDevice currentDevice];
+	deviceName = [device model];
+	OSName = [device systemName];
+	OSVersion = [device systemVersion];
+	
+#else
+	deviceName = @"Macintosh";
+	OSName = @"Mac OS X";
+	
+	// From http://www.cocoadev.com/index.pl?DeterminingOSVersion
+	// We won't bother to check for systems prior to 10.4, since ASIHTTPRequest only works on 10.5+
+    OSErr err;
+    SInt32 versionMajor, versionMinor, versionBugFix;
+	if ((err = Gestalt(gestaltSystemVersionMajor, &versionMajor)) != noErr) return nil;
+	if ((err = Gestalt(gestaltSystemVersionMinor, &versionMinor)) != noErr) return nil;
+	if ((err = Gestalt(gestaltSystemVersionBugFix, &versionBugFix)) != noErr) return nil;
+	OSVersion = [NSString stringWithFormat:@"%u.%u.%u", versionMajor, versionMinor, versionBugFix];
+	
+#endif
+	// Takes the form "My Application 1.0 (Macintosh; Mac OS X 10.5.7; en_GB)"
+	return [NSString stringWithFormat:@"%@ %@ (%@; %@ %@; %@)", appName, appVersion, deviceName, OSName, OSVersion, locale];
+}
+
 
 
 @synthesize username;
