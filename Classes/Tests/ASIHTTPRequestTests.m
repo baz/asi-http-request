@@ -11,6 +11,7 @@
 #import "ASINSStringAdditions.h"
 #import "ASINetworkQueue.h"
 #import "ASIFormDataRequest.h"
+#import <SystemConfiguration/SystemConfiguration.h>
 
 // Used for subclass test
 @interface ASIHTTPRequestSubclass : ASIHTTPRequest {}
@@ -97,7 +98,19 @@
 	
 	BOOL success = [[request error] code] == ASIRequestTimedOutErrorType;
 	GHAssertTrue(success,@"Timeout didn't generate the correct error");
+}
+
+
+// Test fix for a bug that might have caused timeouts when posting data
+- (void)testTimeOutWithoutDownloadDelegate
+{
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://trails-network.net/Downloads/MemexTrails_1.0b1.zip"]];
+	[request setTimeOutSeconds:5];
+	[request setShowAccurateProgress:NO];
+	[request setPostBody:[NSMutableData dataWithData:[@"Small Body" dataUsingEncoding:NSUTF8StringEncoding]]];
+	[request start];
 	
+	GHAssertNil([request error],@"Generated an error (most likely a timeout) - this test might fail on high latency connections");	
 }
 
 
@@ -121,14 +134,14 @@
 	[request start];
 	
 	BOOL success = [[request responseString] isEqualToString:@"HTTP/1.1"];
-	GHAssertTrue(success,@"Wrong HTTP version used");
+	GHAssertTrue(success,@"Wrong HTTP version used (May fail when using a proxy that changes the HTTP version!)");
 	
 	request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
 	[request setUseHTTPVersionOne:YES];
 	[request start];
 	
 	success = [[request responseString] isEqualToString:@"HTTP/1.0"];
-	GHAssertTrue(success,@"Wrong HTTP version used");	
+	GHAssertTrue(success,@"Wrong HTTP version used (May fail when using a proxy that changes the HTTP version!)");	
 }
 
 - (void)testUserAgent
@@ -209,13 +222,7 @@
 	ASIHTTPRequest *request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
 	[request setDownloadDestinationPath:path];
 	[request start];
-	
-	NSString *tempPath = [request temporaryFileDownloadPath];
-	GHAssertNotNil(tempPath,@"Failed to download file to temporary location");		
-	
-	BOOL success = (![[NSFileManager defaultManager] fileExistsAtPath:tempPath]);
-	GHAssertTrue(success,@"Failed to remove file from temporary location");	
-	
+
 #if TARGET_OS_IPHONE
 	UIImage *image = [[[UIImage alloc] initWithContentsOfFile:path] autorelease];
 #else
@@ -224,6 +231,7 @@
 	
 	GHAssertNotNil(image,@"Failed to download data to a file");
 }
+
 
 - (void)testCompressedResponseDownloadToFile
 {
@@ -240,7 +248,7 @@
 	//BOOL success = (![[NSFileManager defaultManager] fileExistsAtPath:tempPath]);
 	//GHAssertTrue(success,@"Failed to remove file from temporary location");	
 	
-	BOOL success = [[NSString stringWithContentsOfURL:[NSURL fileURLWithPath:path]] isEqualToString:@"This is the expected content for the first string"];
+	BOOL success = [[NSString stringWithContentsOfURL:[NSURL fileURLWithPath:path] encoding:NSUTF8StringEncoding error:NULL] isEqualToString:@"This is the expected content for the first string"];
 	GHAssertTrue(success,@"Failed to download data to a file");
 	
 }
@@ -448,8 +456,9 @@
 
 - (void)testBasicAuthentication
 {
+	[ASIHTTPRequest clearSession];
 
-	NSURL *url = [[[NSURL alloc] initWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/basic-authentication"] autorelease];
+	NSURL *url = [NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/basic-authentication"];
 	ASIHTTPRequest *request;
 	BOOL success;
 	NSError *err;
@@ -506,6 +515,34 @@
 	[request start];
 	err = [request error];
 	GHAssertNil(err,@"Failed to use stored credentials");
+	
+	// Tests shouldPresentCredentialsBeforeChallenge
+	request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
+	[request setUseSessionPersistance:YES];
+	[request start];
+	
+	success = [request authenticationRetryCount] == 0;
+	GHAssertTrue(success,@"Didn't supply credentials before being asked for them when talking to the same server with shouldPresentCredentialsBeforeChallenge == YES");	
+	
+	request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
+	[request setUseSessionPersistance:YES];
+	[request setShouldPresentCredentialsBeforeChallenge:NO];
+	[request start];
+	
+	success = [request authenticationRetryCount] == 1;
+	GHAssertTrue(success,@"Supplied credentials before being asked for them");	
+	
+	
+	// Ok, now let's test on a different server
+	url = [NSURL URLWithString:@"https://selfsigned.allseeing-i.com/ASIHTTPRequest/tests/basic-authentication"];
+	request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
+	[request setUseSessionPersistance:YES];
+	[request setUseKeychainPersistance:NO];
+	[request setValidatesSecureCertificate:NO];
+	[request start];
+	success = [[request error] code] == ASIAuthenticationErrorType;
+	GHAssertTrue(success,@"Reused credentials when we shouldn't have");	
+	
 }
 
 
@@ -565,43 +602,39 @@
 	GHAssertTrue(success,@"Failed to clear credentials");
 }
 
-// If you want to run this test, uncomment, and set your hostname, username, password and domain below.	
-//- (void)testNTLMAuthentication
-//{
-//	NSString *theURL = @"";
-//	NSString *username = @"";
-//	NSString *password = @"";
-//	NSString *domain = @"";
-//	
-//	if ([theURL isEqualToString:@""] || [username isEqualToString:@""] || [password isEqualToString:@""]) {
-//		GHAssertFalse(true,@"Skipping NTLM test because no server details were supplied");
-//	}
-//	
-//	[ASIHTTPRequest clearSession];
-//	
-//	NSURL *url = [[[NSURL alloc] initWithString:theURL] autorelease];
-//	ASIHTTPRequest *request;
-//	BOOL success;
-//	NSError *err;
-//	
-//	request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
-//	[request setUseKeychainPersistance:NO];
-//	[request setUseSessionPersistance:NO];
-//	[request start];
-//	success = [[request error] code] == ASIAuthenticationErrorType;
-//	GHAssertTrue(success,@"Failed to generate permission denied error with no credentials");
-//
-//
-//	request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
-//	[request setUseSessionPersistance:YES];
-//	[request setUseKeychainPersistance:NO];
-//	[request setUsername:username];
-//	[request setPassword:password];
-//	[request setDomain:domain];
-//	[request start];
-//	err = [request error];
-//	GHAssertNil(err,@"Got an error when correct credentials were supplied");
-//}
+- (void)testNTLMHandshake
+{
+	// This test connects to a script that masquerades as an NTLM server
+	// It tests that the handshake seems sane, but doesn't actually authenticate
+	
+	[ASIHTTPRequest clearSession];
+	
+	NSURL *url = [NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/pretend-ntlm-handshake"];
+	
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:url];
+	[request setUseKeychainPersistance:NO];
+	[request setUseSessionPersistance:NO];
+	[request start];
+	BOOL success = [[request error] code] == ASIAuthenticationErrorType;
+	GHAssertTrue(success,@"Failed to generate permission denied error with no credentials");
+
+
+	request = [ASIHTTPRequest requestWithURL:url];
+	[request setUseSessionPersistance:YES];
+	[request setUseKeychainPersistance:NO];
+	[request setUsername:@"king"];
+	[request setPassword:@"fink"];
+	[request setDomain:@"Castle.Kingdom"];
+	[request start];
+
+	GHAssertNil([request error],@"Got an error when credentials were supplied");
+	
+	// NSProcessInfo returns a lower case string for host name, while CFNetwork will send a mixed case string for host name, so we'll compare by lowercasing everything
+	NSString *hostName = [[NSProcessInfo processInfo] hostName];
+	NSString *expectedResponse = [[NSString stringWithFormat:@"You are %@ from %@/%@",@"king",@"Castle.Kingdom",hostName] lowercaseString];
+	success = [[[request responseString] lowercaseString] isEqualToString:expectedResponse];
+	GHAssertTrue(success,@"Failed to send credentials correctly? (Expected: '%@', got '%@')",expectedResponse,[[request responseString] lowercaseString]);
+}
 
 - (void)testCompressedResponse
 {
@@ -648,7 +681,7 @@
 	BOOL success = ([request contentLength] == 68);
 	GHAssertTrue(success,@"Failed to download a segment of the data");
 	
-	NSString *content = [NSString stringWithContentsOfFile:downloadPath];
+	NSString *content = [NSString stringWithContentsOfFile:downloadPath encoding:NSUTF8StringEncoding error:NULL];
 	
 	NSString *newPartialContent = [content substringFromIndex:95];
 	success = ([newPartialContent isEqualToString:@"This is the content we ought to be getting if we start from byte 95."]);
@@ -661,13 +694,14 @@
 	GHAssertTrue(success,@"Failed to correctly display increment progress for a partial download");
 }
 
-- (void)testSSL
+// The '000' is to ensure this test runs first, as another test may connect to https://selfsigned.allseeing-i.com and accept the certificate
+- (void)test000SSL
 {
 	NSURL *url = [NSURL URLWithString:@"https://selfsigned.allseeing-i.com"];
 	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:url];
 	[request start];
 	
-	GHAssertNotNil([request error],@"Failed to generate an error for a self-signed certificate");		
+	GHAssertNotNil([request error],@"Failed to generate an error for a self-signed certificate (Will fail on the second run in the same session!)");		
 	
 	// Just for testing the request generated a custom error description - don't do this! You should look at the domain / code of the underlyingError in your own programs.
 	BOOL success = ([[[request error] localizedDescription] isEqualToString:@"A connection failure occurred: SSL problem (possibily a bad/expired/self-signed certificate)"]);
@@ -782,6 +816,171 @@
 }
 
 
+- (void)testThrottlingDownloadBandwidth
+{
+	[ASIHTTPRequest setMaxBandwidthPerSecond:0];
+	
+	// This content is around 128KB in size, and it won't be gzipped, so it should take more than 8 seconds to download at 14.5KB / second
+	// We'll test first without throttling
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/the_great_american_novel_%28abridged%29.txt"]];
+	NSDate *date = [NSDate date];
+	[request start];	
+	
+	NSTimeInterval interval =[date timeIntervalSinceNow];
+	BOOL success = (interval > -7);
+	GHAssertTrue(success,@"Downloaded the file too slowly - either this is a bug, or your internet connection is too slow to run this test (must be able to download 128KB in less than 7 seconds, without throttling)");
+	
+	// Now we'll test with throttling
+	[ASIHTTPRequest setMaxBandwidthPerSecond:ASIWWANBandwidthThrottleAmount];
+	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/the_great_american_novel_%28abridged%29.txt"]];
+	date = [NSDate date];
+	[request start];	
+	
+	[ASIHTTPRequest setMaxBandwidthPerSecond:0];
+	
+	interval =[date timeIntervalSinceNow];
+	success = (interval < -7);
+	GHAssertTrue(success,@"Failed to throttle download");		
+	GHAssertNil([request error],@"Request generated an error - timeout?");	
+	
+}
+
+- (void)testThrottlingUploadBandwidth
+{
+	[ASIHTTPRequest setMaxBandwidthPerSecond:0];
+	
+	// Create a 64KB request body
+	NSData *data = [[[NSMutableData alloc] initWithLength:64*1024] autorelease];
+	
+	// We'll test first without throttling
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ignore"]];
+	[request appendPostData:data];
+	NSDate *date = [NSDate date];
+	[request start];	
+	
+	NSTimeInterval interval =[date timeIntervalSinceNow];
+	BOOL success = (interval > -3);
+	GHAssertTrue(success,@"Uploaded the data too slowly - either this is a bug, or your internet connection is too slow to run this test (must be able to upload 64KB in less than 3 seconds, without throttling)");
+	
+	// Now we'll test with throttling
+	[ASIHTTPRequest setMaxBandwidthPerSecond:ASIWWANBandwidthThrottleAmount];
+	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ignore"]];
+	[request appendPostData:data];
+	date = [NSDate date];
+	[request start];	
+	
+	[ASIHTTPRequest setMaxBandwidthPerSecond:0];
+	
+	interval =[date timeIntervalSinceNow];
+	success = (interval < -3);
+	GHAssertTrue(success,@"Failed to throttle upload");		
+	GHAssertNil([request error],@"Request generated an error - timeout?");	
+	
+}
+
+- (void)authenticationNeededForRequest:(ASIHTTPRequest *)request
+{
+	GHAssertTrue(NO,@"Delegate asked for authentication when running on the main thread");
+}
+
+- (void)testMainThreadDelegateAuthenticationFailure
+{
+	[ASIHTTPRequest clearSession];
+	//GHUnit will not run this function on the main thread, so we'll need to move it there
+	[self performSelectorOnMainThread:@selector(fetchOnMainThread) withObject:nil waitUntilDone:YES];
+		
+}
+
+- (void)fetchOnMainThread
+{
+	// Ensure the delegate is not called when we are running on the main thread
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/basic-authentication"]];
+	[request setDelegate:self];
+	[request start];
+	GHAssertNotNil([request error],@"Failed to generate an authentication error");		
+}
+
+- (void)testFetchToInvalidPath
+{
+	// Test gzipped content
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL	URLWithString:@"http://allseeing-i.com"]];
+	[request setDownloadDestinationPath:@"/an/invalid/location.html"];
+	[request start];
+	GHAssertNotNil([request error],@"Failed to generate an authentication when attempting to write to an invalid location");	
+	
+	//Test non-gzipped content
+	request = [ASIHTTPRequest requestWithURL:[NSURL	URLWithString:@"http://allseeing-i.com/i/logo.png"]];
+	[request setDownloadDestinationPath:@"/an/invalid/location.png"];
+	[request start];
+	GHAssertNotNil([request error],@"Failed to generate an authentication when attempting to write to an invalid location");		
+}
+
+- (void)testResponseStatusMessage
+{
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL	URLWithString:@"http://allseeing-i.com/the-meaning-of-life"]];
+	[request start];	
+	BOOL success = [[request responseStatusMessage] isEqualToString:@"HTTP/1.0 404 Not Found"];
+	GHAssertTrue(success,@"Got wrong response status message");
+}
+
+- (void)testAsynchronousWithGlobalQueue
+{
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/first"]];
+	[request setUserInfo:[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:1] forKey:@"RequestNumber"]];
+	[request setDidFailSelector:@selector(asyncFail:)];
+	[request setDidFinishSelector:@selector(asyncSuccess:)];
+	[request setDelegate:self];
+	[request startAsynchronous];
+	
+	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/second"]];
+	[request setUserInfo:[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:2] forKey:@"RequestNumber"]];
+	[request setDidFailSelector:@selector(asyncFail:)];
+	[request setDidFinishSelector:@selector(asyncSuccess:)];
+	[request setDelegate:self];
+	[request startAsynchronous];
+	
+	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/third"]];
+	[request setUserInfo:[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:3] forKey:@"RequestNumber"]];
+	[request setDidFailSelector:@selector(asyncFail:)];
+	[request setDidFinishSelector:@selector(asyncSuccess:)];
+	[request setDelegate:self];
+	[request startAsynchronous];	
+	
+	request = [ASIHTTPRequest requestWithURL:nil];
+	[request setUserInfo:[NSDictionary dictionaryWithObject:[NSNumber numberWithInt:4] forKey:@"RequestNumber"]];
+	[request setDidFailSelector:@selector(asyncFail:)];
+	[request setDidFinishSelector:@selector(asyncSuccess:)];
+	[request setDelegate:self];
+	[request startAsynchronous];	
+}
+
+
+- (void)asyncFail:(ASIHTTPRequest *)request
+{
+	int requestNumber = [[[request userInfo] objectForKey:@"RequestNumber"] intValue];
+	GHAssertEquals(requestNumber,4,@"Wrong request failed");	
+}
+
+- (void)asyncSuccess:(ASIHTTPRequest *)request
+{
+	int requestNumber = [[[request userInfo] objectForKey:@"RequestNumber"] intValue];
+	GHAssertNotEquals(requestNumber,4,@"Request succeeded when it should have failed");
+	
+	BOOL success;
+	switch (requestNumber) {
+		case 1:
+			success = [[request responseString] isEqualToString:@"This is the expected content for the first string"];
+			break;
+		case 2:
+			success = [[request responseString] isEqualToString:@"This is the expected content for the second string"];
+			break;
+		case 3:
+			success = [[request responseString] isEqualToString:@"This is the expected content for the third string"];
+			break;
+	}
+	GHAssertTrue(success,@"Got wrong request content - very bad!");
+	
+}
+
+
 @end
-
-

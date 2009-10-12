@@ -25,16 +25,19 @@
 - (void)testCookies;
 - (void)testBasicAuthentication;
 - (void)testDigestAuthentication;
-//- (void)testNTLMAuthentication;
+- (void)testNTLMHandshake;
 - (void)testCharacterEncoding;
 - (void)testCompressedResponse;
 - (void)testCompressedResponseDownloadToFile;
-- (void)testSSL;
+- (void)test000SSL;
 - (void)testRedirectPreservesSession;
 - (void)testTooMuchRedirection;
 - (void)testRedirectToNewDomain;
 - (void)test303Redirect;
 - (void)testCompression;
 - (void)testSubclass;
-
+- (void)testTimeOutWithoutDownloadDelegate;
+- (void)testThrottlingDownloadBandwidth;
+- (void)testThrottlingUploadBandwidth;
+- (void)testMainThreadDelegateAuthenticationFailure;
 @end

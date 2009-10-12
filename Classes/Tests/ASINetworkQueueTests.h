@@ -31,6 +31,13 @@ IMPORTANT
 	NSMutableArray *finishedRequests;
 	
 	ASINetworkQueue *releaseTestQueue;
+	ASINetworkQueue *cancelQueue;
+	
+	int authenticationPromptCount;
+	
+	ASINetworkQueue *postQueue;
+	
+	ASINetworkQueue *testNTLMQueue;
 }
 
 - (void)testFailure;
@@ -47,8 +54,22 @@ IMPORTANT
 - (void)testQueueReleaseOnRequestComplete;
 - (void)testQueueReleaseOnQueueComplete;
 
+- (void)testMultipleDownloadsThrottlingBandwidth;
+- (void)testMultipleUploadsThrottlingBandwidth;
+
+/*
+- (void)testCancelStressTest;
+*/
+
+- (void)testDelegateAuthenticationCredentialsReuse;
+- (void)testPOSTWithAuthentication;
+
 @property (retain) NSOperationQueue *immediateCancelQueue;
 @property (retain) NSMutableArray *failedRequests;
 @property (retain) NSMutableArray *finishedRequests;
 @property (retain) ASINetworkQueue *releaseTestQueue;
+@property (retain) ASINetworkQueue *cancelQueue;
+@property (retain) ASINetworkQueue *postQueue;
+@property (retain) ASINetworkQueue *testNTLMQueue;
+
 @end

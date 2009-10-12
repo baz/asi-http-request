@@ -16,6 +16,8 @@
 {
 	[super init];
 	networkQueue = [[ASINetworkQueue alloc] init];
+	NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(updateBandwidthUsageIndicator) userInfo:nil repeats:YES];
+	timer = nil;
 	return self;
 }
 
@@ -32,9 +34,10 @@
 	
 	//Customise our user agent, for no real reason
 	[request addRequestHeader:@"User-Agent" value:@"ASIHTTPRequest"];
-	
 	[request start];
-	if ([request responseString]) {
+	if ([request error]) {
+		[htmlSource setString:[[request error] localizedDescription]];
+	} else if ([request responseString]) {
 		[htmlSource setString:[request responseString]];
 	}
 }
@@ -132,6 +135,20 @@
 	[networkQueue go];
 }
 
+- (void)updateBandwidthUsageIndicator
+{
+	[bandwidthUsed setStringValue:[NSString stringWithFormat:@"%luKB / second",[ASIHTTPRequest averageBandwidthUsedPerSecond]/1024]];
+}
+
+- (IBAction)throttleBandwidth:(id)sender
+{
+	if ([(NSButton *)sender state] == NSOnState) {
+		[ASIHTTPRequest setMaxBandwidthPerSecond:ASIWWANBandwidthThrottleAmount];
+	} else {
+		[ASIHTTPRequest setMaxBandwidthPerSecond:0];
+	}
+}
+
 
 - (void)imageFetch1Complete:(ASIHTTPRequest *)request
 {
@@ -159,7 +176,6 @@
 }
 
 
-
 - (IBAction)fetchTopSecretInformation:(id)sender
 {
 	[networkQueue cancelAllOperations];
@@ -184,7 +200,7 @@
 	}
 }
 
-- (void)authorizationNeededForRequest:(ASIHTTPRequest *)request
+- (void)authenticationNeededForRequest:(ASIHTTPRequest *)request
 {
 	[realm setStringValue:[request authenticationRealm]];
 	[host setStringValue:[[request url] host]];
@@ -196,6 +212,19 @@
 		contextInfo: request];
 }
 
+- (void)proxyAuthenticationNeededForRequest:(ASIHTTPRequest *)request
+{
+	[realm setStringValue:[request proxyAuthenticationRealm]];
+	[host setStringValue:[request proxyHost]];
+	
+	[NSApp beginSheet: loginWindow
+	   modalForWindow: window
+		modalDelegate: self
+	   didEndSelector: @selector(authSheetDidEnd:returnCode:contextInfo:)
+		  contextInfo: request];
+}
+
+
 - (IBAction)dismissAuthSheet:(id)sender {
     [[NSApplication sharedApplication] endSheet: loginWindow returnCode: [(NSControl*)sender tag]];
 }
@@ -203,25 +232,30 @@
 - (void)authSheetDidEnd:(NSWindow *)sheet returnCode:(int)returnCode contextInfo:(void *)contextInfo {
 	ASIHTTPRequest *request = (ASIHTTPRequest *)contextInfo;
     if (returnCode == NSOKButton) {
-		[request setUsername:[[[username stringValue] copy] autorelease]];
-		[request setPassword:[[[password stringValue] copy] autorelease]];
-		[request retryWithAuthentication];
+		if ([request needsProxyAuthentication]) {
+			[request setProxyUsername:[[[username stringValue] copy] autorelease]];
+			[request setProxyPassword:[[[password stringValue] copy] autorelease]];			
+		} else {
+			[request setUsername:[[[username stringValue] copy] autorelease]];
+			[request setPassword:[[[password stringValue] copy] autorelease]];
+		}
+		[request retryUsingSuppliedCredentials];
     } else {
-		[request cancelLoad];
+		[request cancelAuthentication];
 	}
     [loginWindow orderOut: self];
 }
 
 - (IBAction)postWithProgress:(id)sender
 {	
-	//Create a 10MB file
+	//Create a 2MB file
 	NSMutableData *data = [NSMutableData dataWithLength:1024];
 	NSString *path = [[[[NSBundle mainBundle] bundlePath] stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"bigfile"];
 	
 	NSOutputStream *stream = [[[NSOutputStream alloc] initToFileAtPath:path append:NO] autorelease];
 	[stream open];
 	int i;
-	for (i=0; i<1024*10; i++) {
+	for (i=0; i<1024*2; i++) {
 		[stream write:[data mutableBytes] maxLength:[data length]];
 	}
 	

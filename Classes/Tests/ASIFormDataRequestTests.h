@@ -15,4 +15,6 @@
 - (void)testPostWithFileUpload;
 - (void)testEmptyData;
 - (void)testSubclass;
+- (void)testURLEncodedPost;
+- (void)testCharset;
 @end

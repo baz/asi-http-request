@@ -12,9 +12,14 @@
 
 #import "ASIHTTPRequest.h"
 #import <zlib.h>
-#ifndef TARGET_OS_IPHONE
+#if TARGET_OS_IPHONE
+#import "Reachability.h"
+#import "ASIAuthenticationDialog.h"
+#else
 #import <SystemConfiguration/SystemConfiguration.h>
 #endif
+#import "ASIInputStream.h"
+
 
 // We use our own custom run loop mode as CoreAnimation seems to want to hijack our threads otherwise
 static CFStringRef ASIHTTPRequestRunMode = CFSTR("ASIHTTPRequest");
@@ -23,8 +28,14 @@ NSString* const NetworkRequestErrorDomain = @"ASIHTTPRequestErrorDomain";
 
 static const CFOptionFlags kNetworkEvents = kCFStreamEventOpenCompleted | kCFStreamEventHasBytesAvailable | kCFStreamEventEndEncountered | kCFStreamEventErrorOccurred;
 
-static CFHTTPAuthenticationRef sessionAuthentication = NULL;
-static NSMutableDictionary *sessionCredentials = nil;
+// In memory caches of credentials, used on when useSessionPersistance is YES
+static NSMutableArray *sessionCredentialsStore = nil;
+static NSMutableArray *sessionProxyCredentialsStore = nil;
+
+// This lock mediates access to session credentials
+static NSRecursiveLock *sessionCredentialsLock = nil;
+
+// We keep track of cookies we have received here so we can remove them from the sharedHTTPCookieStorage later
 static NSMutableArray *sessionCookies = nil;
 
 // The number of times we will allow requests to redirect before we fail with a redirection error
@@ -43,36 +54,88 @@ static NSError *ASIAuthenticationError;
 static NSError *ASIUnableToCreateRequestError;
 static NSError *ASITooMuchRedirectionError;
 
+static NSMutableArray *bandwidthUsageTracker = nil;
+static unsigned long averageBandwidthUsedPerSecond = 0;
+
+// Records how much bandwidth all requests combined have used in the last second
+static unsigned long bandwidthUsedInLastSecond = 0; 
+
+// A date one second in the future from the time it was created
+static NSDate *bandwidthMeasurementDate = nil;
+
+// Since throttling variables are shared among all requests, we'll use a lock to mediate access
+static NSLock *bandwidthThrottlingLock = nil;
+
+// the maximum number of bytes that can be transmitted in one second
+static unsigned long maxBandwidthPerSecond = 0;
+
+// A default figure for throttling bandwidth on mobile devices
+unsigned long const ASIWWANBandwidthThrottleAmount = 14800;
+
+#if TARGET_OS_IPHONE
+// YES when bandwidth throttling is active
+// This flag does not denote whether throttling is turned on - rather whether it is currently in use
+// It will be set to NO when throttling was turned on with setShouldThrottleBandwidthForWWAN, but a WI-FI connection is active
+static BOOL isBandwidthThrottled = NO;
+
+// When YES, bandwidth will be automatically throttled when using WWAN (3G/Edge/GPRS)
+// Wifi will not be throttled
+static BOOL shouldThrottleBandwithForWWANOnly = NO;
+#endif
+
+// Mediates access to the session cookies so requests
+static NSRecursiveLock *sessionCookiesLock = nil;
+
+// This lock ensures delegates only receive one notification that authentication is required at once
+// When using ASIAuthenticationDialogs, it also ensures only one dialog is shown at once
+// If a request can't aquire the lock immediately, it means a dialog is being shown or a delegate is handling the authentication challenge
+// Once it gets the lock, it will try to look for existing credentials again rather than showing the dialog / notifying the delegate
+// This is so it can make use of any credentials supplied for the other request, if they are appropriate
+static NSRecursiveLock *delegateAuthenticationLock = nil;
+
+static NSOperationQueue *sharedRequestQueue = nil;
 
 // Private stuff
 @interface ASIHTTPRequest ()
-	@property (assign) BOOL complete;
-	@property (retain) NSDictionary *responseHeaders;
-	@property (retain) NSArray *responseCookies;
-	@property (assign) int responseStatusCode;
-	@property (retain) NSMutableData *rawResponseData;
-	@property (retain, nonatomic) NSDate *lastActivityTime;
-	@property (assign) unsigned long long contentLength;
-	@property (assign) unsigned long long partialDownloadSize;
-	@property (assign, nonatomic) unsigned long long uploadBufferSize;
-	@property (assign) NSStringEncoding responseEncoding;
-	@property (retain, nonatomic) NSOutputStream *postBodyWriteStream;
-	@property (retain, nonatomic) NSInputStream *postBodyReadStream;
-	@property (assign) unsigned long long totalBytesRead;
-	@property (assign) unsigned long long totalBytesSent;
-	@property (assign, nonatomic) unsigned long long lastBytesRead;
-	@property (assign, nonatomic) unsigned long long lastBytesSent;
-	@property (retain) NSLock *cancelledLock;
-	@property (assign, nonatomic) BOOL haveBuiltPostBody;
-	@property (retain, nonatomic) NSOutputStream *fileDownloadOutputStream;
-	@property (assign, nonatomic) int authenticationRetryCount;
-	@property (assign, nonatomic) BOOL updatedProgress;
-	@property (assign, nonatomic) BOOL needsRedirect;
-	@property (assign, nonatomic) int redirectCount;
-	@property (retain, nonatomic) NSData *compressedPostBody;
-	@property (retain, nonatomic) NSString *compressedPostBodyFilePath;
-	@property (retain) NSConditionLock *authenticationLock;
+
+- (void)cancelLoad;
+- (BOOL)askDelegateForCredentials;
+- (BOOL)askDelegateForProxyCredentials;
++ (void)measureBandwidthUsage;
++ (void)recordBandwidthUsage;
+
+@property (assign) BOOL complete;
+@property (retain) NSDictionary *responseHeaders;
+@property (retain) NSArray *responseCookies;
+@property (assign) int responseStatusCode;
+@property (retain) NSMutableData *rawResponseData;
+@property (retain, nonatomic) NSDate *lastActivityTime;
+@property (assign) unsigned long long contentLength;
+@property (assign) unsigned long long partialDownloadSize;
+@property (assign, nonatomic) unsigned long long uploadBufferSize;
+@property (assign) NSStringEncoding responseEncoding;
+@property (retain, nonatomic) NSOutputStream *postBodyWriteStream;
+@property (retain, nonatomic) NSInputStream *postBodyReadStream;
+@property (assign) unsigned long long totalBytesRead;
+@property (assign) unsigned long long totalBytesSent;
+@property (assign, nonatomic) unsigned long long lastBytesRead;
+@property (assign, nonatomic) unsigned long long lastBytesSent;
+@property (retain) NSLock *cancelledLock;
+@property (assign, nonatomic) BOOL haveBuiltPostBody;
+@property (retain, nonatomic) NSOutputStream *fileDownloadOutputStream;
+@property (assign) int authenticationRetryCount;
+@property (assign) int proxyAuthenticationRetryCount;
+@property (assign, nonatomic) BOOL updatedProgress;
+@property (assign, nonatomic) BOOL needsRedirect;
+@property (assign, nonatomic) int redirectCount;
+@property (retain, nonatomic) NSData *compressedPostBody;
+@property (retain, nonatomic) NSString *compressedPostBodyFilePath;
+@property (retain) NSConditionLock *authenticationLock;
+@property (retain) NSString *authenticationRealm;
+@property (retain) NSString *proxyAuthenticationRealm;
+@property (retain) NSString *responseStatusMessage;
 @end
+
 
 @implementation ASIHTTPRequest
 
@@ -84,12 +147,16 @@ static NSError *ASITooMuchRedirectionError;
 {
 	if (self == [ASIHTTPRequest class]) {
 		progressLock = [[NSRecursiveLock alloc] init];
+		bandwidthThrottlingLock = [[NSLock alloc] init];
+		sessionCookiesLock = [[NSRecursiveLock alloc] init];
+		sessionCredentialsLock = [[NSRecursiveLock alloc] init];
+		delegateAuthenticationLock = [[NSRecursiveLock alloc] init];
+		bandwidthUsageTracker = [[NSMutableArray alloc] initWithCapacity:5];
 		ASIRequestTimedOutError = [[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIRequestTimedOutErrorType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"The request timed out",NSLocalizedDescriptionKey,nil]] retain];	
 		ASIAuthenticationError = [[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIAuthenticationErrorType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"Authentication needed",NSLocalizedDescriptionKey,nil]] retain];
 		ASIRequestCancelledError = [[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIRequestCancelledErrorType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"The request was cancelled",NSLocalizedDescriptionKey,nil]] retain];
 		ASIUnableToCreateRequestError = [[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIUnableToCreateRequestErrorType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"Unable to create request (bad url?)",NSLocalizedDescriptionKey,nil]] retain];
 		ASITooMuchRedirectionError = [[NSError errorWithDomain:NetworkRequestErrorDomain code:ASITooMuchRedirectionErrorType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"The request failed because it redirected too many times",NSLocalizedDescriptionKey,nil]] retain];	
-
 	}
 	[super initialize];
 }
@@ -100,11 +167,13 @@ static NSError *ASITooMuchRedirectionError;
 	self = [super init];
 	[self setRequestMethod:@"GET"];
 
+	[self setShouldPresentCredentialsBeforeChallenge:YES];
 	[self setShouldRedirect:YES];
 	[self setShowAccurateProgress:YES];
 	[self setShouldResetProgressIndicators:YES];
 	[self setAllowCompressedResponse:YES];
 	[self setDefaultResponseEncoding:NSISOLatin1StringEncoding];
+	[self setShouldPresentProxyAuthenticationDialog:YES];
 	
 	[self setTimeOutSeconds:10];
 	[self setUseSessionPersistance:YES];
@@ -125,8 +194,12 @@ static NSError *ASITooMuchRedirectionError;
 
 - (void)dealloc
 {
+	[self setAuthenticationChallengeInProgress:NO];
 	if (requestAuthentication) {
 		CFRelease(requestAuthentication);
+	}
+	if (proxyAuthentication) {
+		CFRelease(proxyAuthentication);
 	}
 	if (request) {
 		CFRelease(request);
@@ -136,7 +209,6 @@ static NSError *ASITooMuchRedirectionError;
 	[mainRequest release];
 	[postBody release];
 	[compressedPostBody release];
-	[requestCredentials release];
 	[error release];
 	[requestHeaders release];
 	[requestCookies release];
@@ -147,6 +219,15 @@ static NSError *ASITooMuchRedirectionError;
 	[password release];
 	[domain release];
 	[authenticationRealm release];
+	[authenticationScheme release];
+	[requestCredentials release];
+	[proxyHost release];
+	[proxyUsername release];
+	[proxyPassword release];
+	[proxyDomain release];
+	[proxyAuthenticationRealm release];
+	[proxyAuthenticationScheme release];
+	[proxyCredentials release];
 	[url release];
 	[authenticationLock release];
 	[lastActivityTime release];
@@ -155,12 +236,13 @@ static NSError *ASITooMuchRedirectionError;
 	[responseHeaders release];
 	[requestMethod release];
 	[cancelledLock release];
-	[authenticationMethod release];
 	[postBodyFilePath release];
 	[compressedPostBodyFilePath release];
 	[postBodyWriteStream release];
 	[postBodyReadStream release];
 	[streamProperties release];
+	[PACurl release];
+	[responseStatusMessage release];
 	[super dealloc];
 }
 
@@ -188,12 +270,19 @@ static NSError *ASITooMuchRedirectionError;
 			[self setPostBodyWriteStream:nil];
 		}
 
+		NSError *err = nil;
+		NSString *path;
 		if ([self shouldCompressRequestBody]) {
 			[self setCompressedPostBodyFilePath:[NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]]];
 			[ASIHTTPRequest compressDataFromFile:[self postBodyFilePath] toFile:[self compressedPostBodyFilePath]];
-			[self setPostLength:[[[NSFileManager defaultManager] fileAttributesAtPath:[self compressedPostBodyFilePath] traverseLink:NO] fileSize]];
+			path = [self compressedPostBodyFilePath];
 		} else {
-			[self setPostLength:[[[NSFileManager defaultManager] fileAttributesAtPath:[self postBodyFilePath] traverseLink:NO] fileSize]];
+			path = [self postBodyFilePath];
+		}
+		[self setPostLength:[[[NSFileManager defaultManager] attributesOfItemAtPath:path error:&err] fileSize]];
+		if (err) {
+			[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Failed to get attributes for file at path '@%'",path],NSLocalizedDescriptionKey,error,NSUnderlyingErrorKey,nil]]];
+			return;
 		}
 		
 	// Otherwise, we have an in-memory request body
@@ -316,6 +405,15 @@ static NSError *ASITooMuchRedirectionError;
 	}
 }
 
+#pragma mark running a request
+
+// Run a request asynchronously by adding it to the global queue
+// (Use [request start] for a synchronous request)
+- (void)startAsynchronous
+{
+	[[ASIHTTPRequest sharedRequestQueue] addOperation:self];
+}
+
 
 #pragma mark request logic
 
@@ -355,10 +453,20 @@ static NSError *ASITooMuchRedirectionError;
 	
 	
 	// If we've already talked to this server and have valid credentials, let's apply them to the request
-	if ([self useSessionPersistance] && sessionCredentials && sessionAuthentication) {
-		if (!CFHTTPMessageApplyCredentialDictionary(request, sessionAuthentication, (CFMutableDictionaryRef)sessionCredentials, NULL)) {
-			[ASIHTTPRequest setSessionAuthentication:NULL];
-			[ASIHTTPRequest setSessionCredentials:nil];
+	if ([self shouldPresentCredentialsBeforeChallenge]) {
+		if ([self useSessionPersistance]) {
+			NSDictionary *credentials = [self findSessionAuthenticationCredentials];
+			if (credentials) {
+				if (!CFHTTPMessageApplyCredentialDictionary(request, (CFHTTPAuthenticationRef)[credentials objectForKey:@"Authentication"], (CFDictionaryRef)[credentials objectForKey:@"Credentials"], NULL)) {
+					[[self class] removeAuthenticationCredentialsFromSessionStore:[credentials objectForKey:@"Credentials"]];
+				}
+			}
+			credentials = [self findSessionProxyAuthenticationCredentials];
+			if (credentials) {
+				if (!CFHTTPMessageApplyCredentialDictionary(request, (CFHTTPAuthenticationRef)[credentials objectForKey:@"Authentication"], (CFDictionaryRef)[credentials objectForKey:@"Credentials"], NULL)) {
+					[[self class] removeProxyAuthenticationCredentialsFromSessionStore:[credentials objectForKey:@"Credentials"]];
+				}
+			}
 		}
 	}
 	
@@ -413,7 +521,12 @@ static NSError *ASITooMuchRedirectionError;
 	
 	// Should this request resume an existing download?
 	if ([self allowResumeForFileDownloads] && [self downloadDestinationPath] && [self temporaryFileDownloadPath] && [[NSFileManager defaultManager] fileExistsAtPath:[self temporaryFileDownloadPath]]) {
-		[self setPartialDownloadSize:[[[NSFileManager defaultManager] fileAttributesAtPath:[self temporaryFileDownloadPath] traverseLink:NO] fileSize]];
+		NSError *err = nil;
+		[self setPartialDownloadSize:[[[NSFileManager defaultManager] attributesOfItemAtPath:[self temporaryFileDownloadPath] error:&err] fileSize]];
+		if (err) {
+			[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Failed to get attributes for file at path '@%'",[self temporaryFileDownloadPath]],NSLocalizedDescriptionKey,error,NSUnderlyingErrorKey,nil]]];
+			return;
+		}
 		[self addRequestHeader:@"Range" value:[NSString stringWithFormat:@"bytes=%llu-",[self partialDownloadSize]]];
 	}
 	
@@ -429,13 +542,6 @@ static NSError *ASITooMuchRedirectionError;
 	NSString *header;
 	for (header in headers) {
 		CFHTTPMessageSetHeaderFieldValue(request, (CFStringRef)header, (CFStringRef)[[self requestHeaders] objectForKey:header]);
-	}
-
-	// If this is a post/put request and we store the request body in memory, add it to the request
-	if ([self shouldCompressRequestBody] && [self compressedPostBody]) {
-		CFHTTPMessageSetBody(request, (CFDataRef)[self compressedPostBody]);
-	} else if ([self postBody]) {
-		CFHTTPMessageSetBody(request, (CFDataRef)[self postBody]);
 	}
 	
 	[self loadRequest];
@@ -471,18 +577,32 @@ static NSError *ASITooMuchRedirectionError;
 	if (![self downloadDestinationPath]) {
 		[self setRawResponseData:[[[NSMutableData alloc] init] autorelease]];
     }
-    // Create the stream for the request.
+    // Create the stream for the request
+	
+	// Do we need to stream the request body from disk
 	if ([self shouldStreamPostDataFromDisk] && [self postBodyFilePath] && [[NSFileManager defaultManager] fileExistsAtPath:[self postBodyFilePath]]) {
 		
 		// Are we gzipping the request body?
 		if ([self compressedPostBodyFilePath] && [[NSFileManager defaultManager] fileExistsAtPath:[self compressedPostBodyFilePath]]) {
-			[self setPostBodyReadStream:[[[NSInputStream alloc] initWithFileAtPath:[self compressedPostBodyFilePath]] autorelease]];
+			[self setPostBodyReadStream:[ASIInputStream inputStreamWithFileAtPath:[self compressedPostBodyFilePath]]];
 		} else {
-			[self setPostBodyReadStream:[[[NSInputStream alloc] initWithFileAtPath:[self postBodyFilePath]] autorelease]];	
+			[self setPostBodyReadStream:[ASIInputStream inputStreamWithFileAtPath:[self postBodyFilePath]]];
 		}
 		readStream = CFReadStreamCreateForStreamedHTTPRequest(kCFAllocatorDefault, request,(CFReadStreamRef)[self postBodyReadStream]);
     } else {
-		readStream = CFReadStreamCreateForHTTPRequest(kCFAllocatorDefault, request);
+		
+		// If we have a request body, we'll stream it from memory using our custom stream, so that we can measure bandwidth use and it can be bandwidth-throttled if nescessary
+		if ([self postBody]) {
+			if ([self shouldCompressRequestBody] && [self compressedPostBody]) {
+				[self setPostBodyReadStream:[ASIInputStream inputStreamWithData:[self compressedPostBody]]];
+			} else if ([self postBody]) {
+				[self setPostBodyReadStream:[ASIInputStream inputStreamWithData:[self postBody]]];
+			}
+			readStream = CFReadStreamCreateForStreamedHTTPRequest(kCFAllocatorDefault, request,(CFReadStreamRef)[self postBodyReadStream]);
+		
+		} else {
+			readStream = CFReadStreamCreateForHTTPRequest(kCFAllocatorDefault, request);
+		}
 	}
 	if (!readStream) {
 		[[self cancelledLock] unlock];
@@ -503,22 +623,63 @@ static NSError *ASITooMuchRedirectionError;
 		CFReadStreamSetProperty(readStream, kCFStreamPropertySSLSettings, [NSMutableDictionary dictionaryWithObject:(NSString *)kCFBooleanFalse forKey:(NSString *)kCFStreamSSLValidatesCertificateChain]); 
 	}
 	
-	// Detect proxy settings and apply them
-#if TARGET_OS_IPHONE
-	#if TARGET_IPHONE_SIMULATOR
-		#if __IPHONE_OS_VERSION_MIN_REQUIRED > __IPHONE_2_2
-	NSDictionary *proxySettings = [(NSDictionary *)CFNetworkCopySystemProxySettings() autorelease];
-		#else
-	// Can't detect proxies in 2.2.1 Simulator
-	NSDictionary *proxySettings = [NSMutableDictionary dictionary];	
-		#endif
-	#else
-	NSDictionary *proxySettings = [(NSDictionary *)CFNetworkCopySystemProxySettings() autorelease];
-	#endif
-#else
-	NSDictionary *proxySettings = [(NSDictionary *)SCDynamicStoreCopyProxies(NULL) autorelease];
-#endif
-	CFReadStreamSetProperty(readStream, kCFStreamPropertyHTTPProxy, proxySettings);
+	
+	// Handle proxy settings
+
+	// Have details of the proxy been set on this request
+	if (![self proxyHost] && ![self proxyPort]) {
+		
+		// If not, we need to figure out what they'll be
+		
+		NSArray *proxies = nil;
+		
+		// Have we been given a proxy auto config file?
+		if ([self PACurl]) {
+			
+			proxies = [ASIHTTPRequest proxiesForURL:[self url] fromPAC:[self PACurl]];
+
+		// Detect proxy settings and apply them	
+		} else {
+		
+			#if TARGET_OS_IPHONE
+			#if TARGET_IPHONE_SIMULATOR && __IPHONE_OS_VERSION_MIN_REQUIRED < IPHONE_3_0
+			// Can't detect proxies in 2.2.1 Simulator
+			NSDictionary *proxySettings = [NSMutableDictionary dictionary];	
+			#else
+			NSDictionary *proxySettings = [(NSDictionary *)CFNetworkCopySystemProxySettings() autorelease];
+			#endif
+			#else
+			NSDictionary *proxySettings = [(NSDictionary *)SCDynamicStoreCopyProxies(NULL) autorelease];
+			#endif
+
+			proxies = [(NSArray *)CFNetworkCopyProxiesForURL((CFURLRef)[self url], (CFDictionaryRef)proxySettings) autorelease];
+			
+			// Now check to see if the proxy settings contained a PAC url, we need to run the script to get the real list of proxies if so
+			NSDictionary *settings = [proxies objectAtIndex:0];
+			if ([settings objectForKey:(NSString *)kCFProxyAutoConfigurationURLKey]) {
+				proxies = [ASIHTTPRequest proxiesForURL:[self url] fromPAC:[settings objectForKey:(NSString *)kCFProxyAutoConfigurationURLKey]];
+			}
+		}
+		
+		if (!proxies) {
+			CFRelease(readStream);
+			readStream = NULL;
+			[[self cancelledLock] unlock];
+			[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIInternalErrorWhileBuildingRequestType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"Unable to obtain information on proxy servers needed for request",NSLocalizedDescriptionKey,nil]]];
+			return;			
+		}
+		// I don't really understand why the dictionary returned by CFNetworkCopyProxiesForURL uses different key names from CFNetworkCopySystemProxySettings/SCDynamicStoreCopyProxies
+		// and why its key names are documented while those we actually need to use don't seem to be (passing the kCF* keys doesn't seem to work)
+		if ([proxies count] > 0) {
+			NSDictionary *settings = [proxies objectAtIndex:0];
+			[self setProxyHost:[settings objectForKey:(NSString *)kCFProxyHostNameKey]];
+			[self setProxyPort:[[settings objectForKey:(NSString *)kCFProxyPortNumberKey] intValue]];
+		}
+	}
+	if ([self proxyHost] && [self proxyPort]) {
+		NSMutableDictionary *proxyToUse = [NSMutableDictionary dictionaryWithObjectsAndKeys:[self proxyHost],kCFStreamPropertyHTTPProxyHost,[NSNumber numberWithInt:[self proxyPort]],kCFStreamPropertyHTTPProxyPort,nil];
+		CFReadStreamSetProperty(readStream, kCFStreamPropertyHTTPProxy, proxyToUse);
+	}
 	
     // Set the client
 	CFStreamClientContext ctxt = {0, self, NULL, NULL, NULL};
@@ -553,6 +714,8 @@ static NSError *ASITooMuchRedirectionError;
 		}
 		[self resetUploadProgress:amount];
 	}	
+	// Record when the request started, so we can timeout if nothing happens
+	[self setLastActivityTime:[NSDate date]];	
 }
 
 // This is the 'main loop' for the request. Basically, it runs the runloop that our network stuff is attached to, and checks to see if we should cancel or timeout
@@ -560,9 +723,7 @@ static NSError *ASITooMuchRedirectionError;
 {
 	[self startRequest];
 	
-	// Record when the request started, so we can timeout if nothing happens
-	[self setLastActivityTime:[NSDate date]];
-	
+
 	// Wait for the request to finish
 	while (!complete) {
 		
@@ -572,14 +733,18 @@ static NSError *ASITooMuchRedirectionError;
 		
 		NSDate *now = [NSDate date];
 		
+		// We won't let the request cancel until we're done with this cycle of the loop
+		[[self cancelledLock] lock];
+		
 		// See if we need to timeout
 		if (lastActivityTime && timeOutSeconds > 0 && [now timeIntervalSinceDate:lastActivityTime] > timeOutSeconds) {
 			
 			// Prevent timeouts before 128KB* has been sent when the size of data to upload is greater than 128KB* (*32KB on iPhone 3.0 SDK)
 			// This is to workaround the fact that kCFStreamPropertyHTTPRequestBytesWrittenCount is the amount written to the buffer, not the amount actually sent
 			// This workaround prevents erroneous timeouts in low bandwidth situations (eg iPhone)
-			if (contentLength <= uploadBufferSize || (uploadBufferSize > 0 && totalBytesSent > uploadBufferSize)) {
+			if (totalBytesSent || postLength <= uploadBufferSize || (uploadBufferSize > 0 && totalBytesSent > uploadBufferSize)) {
 				[self failWithError:ASIRequestTimedOutError];
+				[[self cancelledLock] unlock];
 				[self cancelLoad];
 				[self setComplete:YES];
 				break;
@@ -588,6 +753,7 @@ static NSError *ASITooMuchRedirectionError;
 		
 		// Do we need to redirect?
 		if ([self needsRedirect]) {
+			[[self cancelledLock] unlock];
 			[self cancelLoad];
 			[self setNeedsRedirect:NO];
 			[self setRedirectCount:[self redirectCount]+1];
@@ -603,7 +769,8 @@ static NSError *ASITooMuchRedirectionError;
 		}
 		
 		// See if our NSOperationQueue told us to cancel
-		if ([self isCancelled]) {
+		if ([self isCancelled] || [self complete]) {
+			[[self cancelledLock] unlock];
 			break;
 		}
 		
@@ -612,15 +779,17 @@ static NSError *ASITooMuchRedirectionError;
 			[self setLastActivityTime:[NSDate date]];
 			[self setLastBytesSent:totalBytesSent];
 		}
-		
+
 		// Find out how much data we've uploaded so far
-		[[self cancelledLock] lock];
 		[self setTotalBytesSent:[[(NSNumber *)CFReadStreamCopyProperty(readStream, kCFStreamPropertyHTTPRequestBytesWrittenCount) autorelease] unsignedLongLongValue]];
+		
+		// Updating the progress indicators will attempt to aquire the lock again when needed
 		[[self cancelledLock] unlock];
 		
 		[self updateProgressIndicators];
 		
-		
+		// Measure bandwidth used, and throttle if nescessary
+		[ASIHTTPRequest measureBandwidthUsage];
 		
 		// This thread should wait for 1/4 second for the stream to do something. We'll stop early if it does.
 		CFRunLoopRunInMode(ASIHTTPRequestRunMode,0.25,YES);
@@ -630,36 +799,37 @@ static NSError *ASITooMuchRedirectionError;
 	pool = nil;
 }
 
-// Cancel loading and clean up
+// Cancel loading and clean up. NEVER CALL THIS FROM ANOTHER THREAD!
 - (void)cancelLoad
 {
 	[[self cancelledLock] lock];
     if (readStream) {
-        CFReadStreamClose(readStream);
-        CFReadStreamSetClient(readStream, kCFStreamEventNone, NULL, NULL);
-        CFReadStreamUnscheduleFromRunLoop(readStream, CFRunLoopGetCurrent(), ASIHTTPRequestRunMode);
-        CFRelease(readStream);
-        readStream = NULL;
+		CFReadStreamSetClient(readStream, kCFStreamEventNone, NULL, NULL);
+		CFReadStreamUnscheduleFromRunLoop(readStream, CFRunLoopGetCurrent(), ASIHTTPRequestRunMode);
+		CFReadStreamClose(readStream);
+		CFRelease(readStream);
+		readStream = NULL;
     }
 	
 	[[self postBodyReadStream] close];
 	
-    if (rawResponseData) {
+    if ([self rawResponseData]) {
 		[self setRawResponseData:nil];
 	
 	// If we were downloading to a file
-	} else if (temporaryFileDownloadPath) {
-		[fileDownloadOutputStream close];
+	} else if ([self temporaryFileDownloadPath]) {
+		[[self fileDownloadOutputStream] close];
 		
 		// If we haven't said we might want to resume, let's remove the temporary file too
 		if (![self allowResumeForFileDownloads]) {
-			[[NSFileManager defaultManager] removeItemAtPath:temporaryFileDownloadPath error:NULL];
+			[self removeTemporaryDownloadFile];
 		}
 	}
 	
 	// Clean up any temporary file used to store request body for streaming
-	if ([self didCreateTemporaryPostDataFile]) {
+	if (![self authenticationChallengeInProgress] && [self didCreateTemporaryPostDataFile]) {
 		[self removePostDataFile];
+		[self setDidCreateTemporaryPostDataFile:NO];
 	}
 	
 	[self setResponseHeaders:nil];
@@ -669,11 +839,13 @@ static NSError *ASITooMuchRedirectionError;
 
 - (void)removeTemporaryDownloadFile
 {
-	if (temporaryFileDownloadPath) {
-		NSError *removeError = nil;
-		[[NSFileManager defaultManager] removeItemAtPath:temporaryFileDownloadPath error:&removeError];
-		if (removeError) {
-			[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Failed to delete file at %@ with error: %@",temporaryFileDownloadPath,removeError],NSLocalizedDescriptionKey,removeError,NSUnderlyingErrorKey,nil]]];
+	if ([self temporaryFileDownloadPath]) {
+		if ([[NSFileManager defaultManager] fileExistsAtPath:[self temporaryFileDownloadPath]]) {
+			NSError *removeError = nil;
+			[[NSFileManager defaultManager] removeItemAtPath:[self temporaryFileDownloadPath] error:&removeError];
+			if (removeError) {
+				[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Failed to delete file at path '%@'",[self temporaryFileDownloadPath]],NSLocalizedDescriptionKey,removeError,NSUnderlyingErrorKey,nil]]];
+			}
 		}
 		[self setTemporaryFileDownloadPath:nil];
 	}
@@ -685,7 +857,7 @@ static NSError *ASITooMuchRedirectionError;
 		NSError *removeError = nil;
 		[[NSFileManager defaultManager] removeItemAtPath:[self postBodyFilePath] error:&removeError];
 		if (removeError) {
-			[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Failed to delete file at %@ with error: %@",[self postBodyFilePath],removeError],NSLocalizedDescriptionKey,removeError,NSUnderlyingErrorKey,nil]]];
+			[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Failed to delete file at path '%@'",[self postBodyFilePath]],NSLocalizedDescriptionKey,removeError,NSUnderlyingErrorKey,nil]]];
 		}
 		[self setPostBodyFilePath:nil];
 	}
@@ -693,7 +865,7 @@ static NSError *ASITooMuchRedirectionError;
 		NSError *removeError = nil;
 		[[NSFileManager defaultManager] removeItemAtPath:[self compressedPostBodyFilePath] error:&removeError];
 		if (removeError) {
-			[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Failed to delete file at %@ with error: %@",[self compressedPostBodyFilePath],removeError],NSLocalizedDescriptionKey,removeError,NSUnderlyingErrorKey,nil]]];
+			[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Failed to delete file at path '%@'",[self compressedPostBodyFilePath]],NSLocalizedDescriptionKey,removeError,NSUnderlyingErrorKey,nil]]];
 		}
 		[self setCompressedPostBodyFilePath:nil];
 	}
@@ -860,11 +1032,6 @@ static NSError *ASITooMuchRedirectionError;
 	if (responseHeaders) {
 		
 		unsigned long long bytesReadSoFar = totalBytesRead+partialDownloadSize;
-		
-		if (bytesReadSoFar > lastBytesRead) {
-			[self setLastActivityTime:[NSDate date]];
-		}
-		
 
 		// We're using a progress queue or compatible controller to handle progress
 		SEL selector = @selector(incrementDownloadProgressBy:);
@@ -1017,17 +1184,26 @@ static NSError *ASITooMuchRedirectionError;
 
 - (BOOL)readResponseHeadersReturningAuthenticationFailure
 {
+	[self setAuthenticationChallengeInProgress:NO];
+	[self setNeedsProxyAuthentication:NO];
 	BOOL isAuthenticationChallenge = NO;
 	CFHTTPMessageRef headers = (CFHTTPMessageRef)CFReadStreamCopyProperty(readStream, kCFStreamPropertyHTTPResponseHeader);
 	if (CFHTTPMessageIsHeaderComplete(headers)) {
 		
 		CFDictionaryRef headerFields = CFHTTPMessageCopyAllHeaderFields(headers);
 		[self setResponseHeaders:(NSDictionary *)headerFields];
+
 		CFRelease(headerFields);
 		[self setResponseStatusCode:CFHTTPMessageGetResponseStatusCode(headers)];
-		
+		[self setResponseStatusMessage:[(NSString *)CFHTTPMessageCopyResponseStatusLine(headers) autorelease]];
+
 		// Is the server response a challenge for credentials?
 		isAuthenticationChallenge = ([self responseStatusCode] == 401);
+		if ([self responseStatusCode] == 407) {
+			isAuthenticationChallenge = YES;
+			[self setNeedsProxyAuthentication:YES];
+		}
+		[self setAuthenticationChallengeInProgress:isAuthenticationChallenge];
 		
 		// We won't reset the download progress delegate if we got an authentication challenge
 		if (!isAuthenticationChallenge) {
@@ -1109,21 +1285,60 @@ static NSError *ASITooMuchRedirectionError;
 	CFRelease(headers);
 	return isAuthenticationChallenge;
 }
+	
 
 #pragma mark http authentication
 
-- (void)saveCredentialsToKeychain:(NSMutableDictionary *)newCredentials
+- (void)saveProxyCredentialsToKeychain:(NSDictionary *)newCredentials
 {
-	NSURLCredential *authenticationCredentials = [NSURLCredential credentialWithUser:[newCredentials objectForKey:(NSString *)kCFHTTPAuthenticationUsername]
-																			password:[newCredentials objectForKey:(NSString *)kCFHTTPAuthenticationPassword]
-																		 persistence:NSURLCredentialPersistencePermanent];
-	
+	NSURLCredential *authenticationCredentials = [NSURLCredential credentialWithUser:[newCredentials objectForKey:(NSString *)kCFHTTPAuthenticationUsername] password:[newCredentials objectForKey:(NSString *)kCFHTTPAuthenticationPassword] persistence:NSURLCredentialPersistencePermanent];
 	if (authenticationCredentials) {
-		[ASIHTTPRequest saveCredentials:authenticationCredentials forHost:[url host] port:[[url port] intValue] protocol:[url scheme] realm:authenticationRealm];
+		[ASIHTTPRequest saveCredentials:authenticationCredentials forProxy:[self proxyHost] port:[self proxyPort] realm:[self proxyAuthenticationRealm]];
 	}	
 }
 
-- (BOOL)applyCredentials:(NSMutableDictionary *)newCredentials
+
+- (void)saveCredentialsToKeychain:(NSDictionary *)newCredentials
+{
+	NSURLCredential *authenticationCredentials = [NSURLCredential credentialWithUser:[newCredentials objectForKey:(NSString *)kCFHTTPAuthenticationUsername] password:[newCredentials objectForKey:(NSString *)kCFHTTPAuthenticationPassword] persistence:NSURLCredentialPersistencePermanent];
+	
+	if (authenticationCredentials) {
+		[ASIHTTPRequest saveCredentials:authenticationCredentials forHost:[[self url] host] port:[[[self url] port] intValue] protocol:[[self url] scheme] realm:[self authenticationRealm]];
+	}	
+}
+
+- (BOOL)applyProxyCredentials:(NSDictionary *)newCredentials
+{
+	[self setProxyAuthenticationRetryCount:[self proxyAuthenticationRetryCount]+1];
+	
+	if (newCredentials && proxyAuthentication && request) {
+
+		// Apply whatever credentials we've built up to the old request
+		if (CFHTTPMessageApplyCredentialDictionary(request, proxyAuthentication, (CFMutableDictionaryRef)newCredentials, NULL)) {
+			
+			//If we have credentials and they're ok, let's save them to the keychain
+			if (useKeychainPersistance) {
+				[self saveProxyCredentialsToKeychain:newCredentials];
+			}
+			if (useSessionPersistance) {
+				NSMutableDictionary *sessionProxyCredentials = [NSMutableDictionary dictionary];
+				[sessionProxyCredentials setObject:(id)proxyAuthentication forKey:@"Authentication"];
+				[sessionProxyCredentials setObject:newCredentials forKey:@"Credentials"];
+				[sessionProxyCredentials setObject:[self proxyHost] forKey:@"Host"];
+				[sessionProxyCredentials setObject:[NSNumber numberWithInt:[self proxyPort]] forKey:@"Port"];
+				[sessionProxyCredentials setObject:[self proxyAuthenticationScheme] forKey:@"AuthenticationScheme"];
+				[[self class] storeProxyAuthenticationCredentialsInSessionStore:sessionProxyCredentials];
+			}
+			[self setProxyCredentials:newCredentials];
+			return YES;
+		} else {
+			[[self class] removeProxyAuthenticationCredentialsFromSessionStore:newCredentials];
+		}
+	}
+	return NO;
+}
+
+- (BOOL)applyCredentials:(NSDictionary *)newCredentials
 {
 	[self setAuthenticationRetryCount:[self authenticationRetryCount]+1];
 	
@@ -1137,60 +1352,58 @@ static NSError *ASITooMuchRedirectionError;
 			}
 			if (useSessionPersistance) {
 				
-				[ASIHTTPRequest setSessionAuthentication:requestAuthentication];
-				[ASIHTTPRequest setSessionCredentials:newCredentials];
+				NSMutableDictionary *sessionCredentials = [NSMutableDictionary dictionary];
+				[sessionCredentials setObject:(id)requestAuthentication forKey:@"Authentication"];
+				[sessionCredentials setObject:newCredentials forKey:@"Credentials"];
+				[sessionCredentials setObject:[self url] forKey:@"URL"];
+				[sessionCredentials setObject:[self authenticationScheme] forKey:@"AuthenticationScheme"];
+				if ([self authenticationRealm]) {
+					[sessionCredentials setObject:[self authenticationRealm] forKey:@"AuthenticationRealm"];
+				}
+				[[self class] storeAuthenticationCredentialsInSessionStore:sessionCredentials];
+
 			}
 			[self setRequestCredentials:newCredentials];
 			return YES;
+		} else {
+			[[self class] removeAuthenticationCredentialsFromSessionStore:newCredentials];
 		}
 	}
 	return NO;
 }
 
-- (NSMutableDictionary *)findCredentials
+- (NSMutableDictionary *)findProxyCredentials
 {
 	NSMutableDictionary *newCredentials = [[[NSMutableDictionary alloc] init] autorelease];
 	
 	// Is an account domain needed? (used currently for NTLM only)
-	if (CFHTTPAuthenticationRequiresAccountDomain(requestAuthentication)) {
-		if (!domain) {
-			[self setDomain:@""];
+	if (CFHTTPAuthenticationRequiresAccountDomain(proxyAuthentication)) {
+		if (![self proxyDomain]) {
+			[self setProxyDomain:@""];
 		}
-		[newCredentials setObject:domain forKey:(NSString *)kCFHTTPAuthenticationAccountDomain];
+		[newCredentials setObject:[self proxyDomain] forKey:(NSString *)kCFHTTPAuthenticationAccountDomain];
 	}
 	
-	// Get the authentication realm
-	[authenticationRealm release];
-	authenticationRealm = nil;
-	if (!CFHTTPAuthenticationRequiresAccountDomain(requestAuthentication)) {
-		authenticationRealm = (NSString *)CFHTTPAuthenticationCopyRealm(requestAuthentication);
-	}
+	NSString *user = nil;
+	NSString *pass = nil;
 	
-	// First, let's look at the url to see if the username and password were included
-	NSString *user = [url user];
-	NSString *pass = [url password];
-	
-	// If the username and password weren't in the url
-	if (!user || !pass) {
+
+	// If this is a HEAD request generated by an ASINetworkQueue, we'll try to use the details from the main request
+	if ([self mainRequest] && [[self mainRequest] proxyUsername] && [[self mainRequest] proxyPassword]) {
+		user = [[self mainRequest] proxyUsername];
+		pass = [[self mainRequest] proxyPassword];
 		
-		// If this is a HEAD request generated by an ASINetworkQueue, we'll try to use the details from the main request
-		if ([self mainRequest] && [[self mainRequest] username] && [[self mainRequest] password]) {
-			user = [[self mainRequest] username];
-			pass = [[self mainRequest] password];
-			
 		// Let's try to use the ones set in this object
-		} else if (username && password) {
-			user = username;
-			pass = password;
-		}		
-		
-	}
-	
+	} else if ([self proxyUsername] && [self proxyPassword]) {
+		user = [self proxyUsername];
+		pass = [self proxyPassword];
+	}		
 
 	
 	// Ok, that didn't work, let's try the keychain
-	if ((!user || !pass) && useKeychainPersistance) {
-		NSURLCredential *authenticationCredentials = [ASIHTTPRequest savedCredentialsForHost:[url host] port:443 protocol:[url scheme] realm:authenticationRealm];
+	// For authenticating proxies, we'll look in the keychain regardless of the value of useKeychainPersistance
+	if ((!user || !pass)) {
+		NSURLCredential *authenticationCredentials = [ASIHTTPRequest savedCredentialsForProxy:[self proxyHost] port:[self proxyPort] protocol:[[self url] scheme] realm:[self proxyAuthenticationRealm]];
 		if (authenticationCredentials) {
 			user = [authenticationCredentials user];
 			pass = [authenticationCredentials password];
@@ -1208,28 +1421,357 @@ static NSError *ASITooMuchRedirectionError;
 	return nil;
 }
 
-// Called by delegate to resume loading once authentication info has been populated
-- (void)retryWithAuthentication
+
+- (NSMutableDictionary *)findCredentials
 {
-	[authenticationLock lockWhenCondition:1];
-	[authenticationLock unlockWithCondition:2];
+	NSMutableDictionary *newCredentials = [[[NSMutableDictionary alloc] init] autorelease];
+	
+	// Is an account domain needed? (used currently for NTLM only)
+	if (CFHTTPAuthenticationRequiresAccountDomain(requestAuthentication)) {
+		if (!domain) {
+			[self setDomain:@""];
+		}
+		[newCredentials setObject:domain forKey:(NSString *)kCFHTTPAuthenticationAccountDomain];
+	}
+	
+	// First, let's look at the url to see if the username and password were included
+	NSString *user = [[self url] user];
+	NSString *pass = [[self url] password];
+	
+	// If the username and password weren't in the url
+	if (!user || !pass) {
+		
+		// If this is a HEAD request generated by an ASINetworkQueue, we'll try to use the details from the main request
+		if ([self mainRequest] && [[self mainRequest] username] && [[self mainRequest] password]) {
+			user = [[self mainRequest] username];
+			pass = [[self mainRequest] password];
+			
+		// Let's try to use the ones set in this object
+		} else if ([self username] && [self password]) {
+			user = [self username];
+			pass = [self password];
+		}		
+		
+	}
+	
+	// Ok, that didn't work, let's try the keychain
+	if ((!user || !pass) && useKeychainPersistance) {
+		NSURLCredential *authenticationCredentials = [ASIHTTPRequest savedCredentialsForHost:[[self url] host] port:[[[self url] port] intValue] protocol:[[self url] scheme] realm:[self authenticationRealm]];
+		if (authenticationCredentials) {
+			user = [authenticationCredentials user];
+			pass = [authenticationCredentials password];
+		}
+		
+	}
+	
+	// If we have a username and password, let's apply them to the request and continue
+	if (user && pass) {
+		
+		[newCredentials setObject:user forKey:(NSString *)kCFHTTPAuthenticationUsername];
+		[newCredentials setObject:pass forKey:(NSString *)kCFHTTPAuthenticationPassword];
+		return newCredentials;
+	}
+	return nil;
+}
+
+// Called by delegate or authentication dialog to resume loading once authentication info has been populated
+- (void)retryUsingSuppliedCredentials
+{
+	[[self authenticationLock] lockWhenCondition:1];
+	[[self authenticationLock] unlockWithCondition:2];
+}
+
+// Called by delegate or authentication dialog to cancel authentication
+- (void)cancelAuthentication
+{
+	[self failWithError:ASIAuthenticationError];
+	[[self authenticationLock] lockWhenCondition:1];
+	[[self authenticationLock] unlockWithCondition:2];
+}
+
+- (BOOL)showProxyAuthenticationDialog
+{
+// Mac authentication dialog coming soon!
+#if TARGET_OS_IPHONE
+	// Cannot show the dialog when we are running on the main thread, as the locks will cause the app to hang
+	if ([self shouldPresentProxyAuthenticationDialog] && ![NSThread isMainThread]) {
+		[ASIAuthenticationDialog performSelectorOnMainThread:@selector(presentProxyAuthenticationDialogForRequest:) withObject:self waitUntilDone:[NSThread isMainThread]];
+		[[self authenticationLock] lockWhenCondition:2];
+		[[self authenticationLock] unlockWithCondition:1];
+		if ([self error]) {
+			return NO;
+		}
+		return YES;
+	}
+	return NO;
+#else
+	return NO;
+#endif
+}
+
+
+- (BOOL)askDelegateForProxyCredentials
+{
+	// Can't use delegate authentication when running on the main thread
+	if ([NSThread isMainThread]) {
+		return NO;
+	}
+	
+	// If we have a delegate, we'll see if it can handle proxyAuthenticationNeededForRequest:.
+	// Otherwise, we'll try the queue (if this request is part of one) and it will pass the message on to its own delegate
+	id authenticationDelegate = [self delegate];
+	if (!authenticationDelegate) {
+		authenticationDelegate = [self queue];
+	}
+	
+	if ([authenticationDelegate respondsToSelector:@selector(proxyAuthenticationNeededForRequest:)]) {
+		[authenticationDelegate performSelectorOnMainThread:@selector(proxyAuthenticationNeededForRequest:) withObject:self waitUntilDone:[NSThread isMainThread]];
+		[[self authenticationLock] lockWhenCondition:2];
+		[[self authenticationLock] unlockWithCondition:1];
+		
+		// Was the request cancelled?
+		if ([self error] || [[self mainRequest] error]) {
+			return NO;
+		}
+		return YES;
+	}
+	return NO;
+}
+
+- (void)attemptToApplyProxyCredentialsAndResume
+{
+	
+	if ([self error] || [self isCancelled]) {
+		return;
+	}
+	
+	// Read authentication data
+	if (!proxyAuthentication) {
+		CFHTTPMessageRef responseHeader = (CFHTTPMessageRef) CFReadStreamCopyProperty(readStream,kCFStreamPropertyHTTPResponseHeader);
+		proxyAuthentication = CFHTTPAuthenticationCreateFromResponse(NULL, responseHeader);
+		CFRelease(responseHeader);
+		[self setProxyAuthenticationScheme:[(NSString *)CFHTTPAuthenticationCopyMethod(proxyAuthentication) autorelease]];
+	}
+	
+	// If we haven't got a CFHTTPAuthenticationRef by now, something is badly wrong, so we'll have to give up
+	if (!proxyAuthentication) {
+		[self cancelLoad];
+		[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIInternalErrorWhileApplyingCredentialsType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"Failed to get authentication object from response headers",NSLocalizedDescriptionKey,nil]]];
+		return;
+	}
+	
+	// Get the authentication realm
+	[self setProxyAuthenticationRealm:nil];
+	if (!CFHTTPAuthenticationRequiresAccountDomain(proxyAuthentication)) {
+		[self setProxyAuthenticationRealm:[(NSString *)CFHTTPAuthenticationCopyRealm(proxyAuthentication) autorelease]];
+	}
+	
+	// See if authentication is valid
+	CFStreamError err;		
+	if (!CFHTTPAuthenticationIsValid(proxyAuthentication, &err)) {
+		
+		CFRelease(proxyAuthentication);
+		proxyAuthentication = NULL;
+		
+		// check for bad credentials, so we can give the delegate a chance to replace them
+		if (err.domain == kCFStreamErrorDomainHTTP && (err.error == kCFStreamErrorHTTPAuthenticationBadUserName || err.error == kCFStreamErrorHTTPAuthenticationBadPassword)) {
+			
+			// Prevent more than one request from asking for credentials at once
+			[delegateAuthenticationLock lock];
+			
+			// We know the credentials we just presented are bad, we should remove them from the session store too
+			[[self class] removeProxyAuthenticationCredentialsFromSessionStore:proxyCredentials];
+			[self setProxyCredentials:nil];
+			
+			
+			// If the user cancelled authentication via a dialog presented by another request, our queue may have cancelled us
+			if ([self error] || [self isCancelled]) {
+				[delegateAuthenticationLock unlock];
+				return;
+			}
+			
+			
+			// Now we've acquired the lock, it may be that the session contains credentials we can re-use for this request
+			if ([self useSessionPersistance]) {
+				NSDictionary *credentials = [self findSessionProxyAuthenticationCredentials];
+				if (credentials && [self applyProxyCredentials:[credentials objectForKey:@"Credentials"]]) {
+					[delegateAuthenticationLock unlock];
+					[self startRequest];
+					return;
+				}
+			}
+			
+			[self setLastActivityTime:nil];
+			
+			if ([self askDelegateForProxyCredentials]) {
+				[self attemptToApplyProxyCredentialsAndResume];
+				[delegateAuthenticationLock unlock];
+				return;
+			}
+			if ([self showProxyAuthenticationDialog]) {
+				[self attemptToApplyProxyCredentialsAndResume];
+				[delegateAuthenticationLock unlock];
+				return;
+			}
+			[delegateAuthenticationLock unlock];
+		}
+		[self cancelLoad];
+		[self failWithError:ASIAuthenticationError];
+		return;
+	}
+
+	[self cancelLoad];
+	
+	if (proxyCredentials) {
+		
+		// We use startRequest rather than starting all over again in load request because NTLM requires we reuse the request
+		if ((([self proxyAuthenticationScheme] != (NSString *)kCFHTTPAuthenticationSchemeNTLM) || [self proxyAuthenticationRetryCount] < 2) && [self applyCredentials:proxyCredentials]) {
+			[self startRequest];
+			
+		// We've failed NTLM authentication twice, we should assume our credentials are wrong
+		} else if ([self proxyAuthenticationScheme] == (NSString *)kCFHTTPAuthenticationSchemeNTLM && [self proxyAuthenticationRetryCount] == 2) {
+			[self failWithError:ASIAuthenticationError];
+			
+		// Something went wrong, we'll have to give up
+		} else {
+			[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIInternalErrorWhileApplyingCredentialsType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"Failed to apply proxy credentials to request",NSLocalizedDescriptionKey,nil]]];
+		}
+		
+	// Are a user name & password needed?
+	}  else if (CFHTTPAuthenticationRequiresUserNameAndPassword(proxyAuthentication)) {
+		
+		// Prevent more than one request from asking for credentials at once
+		[delegateAuthenticationLock lock];
+		
+		// If the user cancelled authentication via a dialog presented by another request, our queue may have cancelled us
+		if ([self error] || [self isCancelled]) {
+			[delegateAuthenticationLock unlock];
+			return;
+		}
+		
+		// Now we've acquired the lock, it may be that the session contains credentials we can re-use for this request
+		if ([self useSessionPersistance]) {
+			NSDictionary *credentials = [self findSessionProxyAuthenticationCredentials];
+			if (credentials && [self applyProxyCredentials:[credentials objectForKey:@"Credentials"]]) {
+				[delegateAuthenticationLock unlock];
+				[self startRequest];
+				return;
+			}
+		}
+		
+		NSMutableDictionary *newCredentials = [self findProxyCredentials];
+		
+		//If we have some credentials to use let's apply them to the request and continue
+		if (newCredentials) {
+			
+			if ([self applyProxyCredentials:newCredentials]) {
+				[delegateAuthenticationLock unlock];
+				[self startRequest];
+			} else {
+				[delegateAuthenticationLock unlock];
+				[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIInternalErrorWhileApplyingCredentialsType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"Failed to apply proxy credentials to request",NSLocalizedDescriptionKey,nil]]];
+			}
+			
+			return;
+		}
+		
+		if ([self askDelegateForProxyCredentials]) {
+			[self attemptToApplyProxyCredentialsAndResume];
+			[delegateAuthenticationLock unlock];
+			return;
+		}
+		
+		if ([self showProxyAuthenticationDialog]) {
+			[self attemptToApplyProxyCredentialsAndResume];
+			[delegateAuthenticationLock unlock];
+			return;
+		}
+		[delegateAuthenticationLock unlock];
+		
+		// The delegate isn't interested and we aren't showing the authentication dialog, we'll have to give up
+		[self failWithError:ASIAuthenticationError];
+		return;
+	}
+	
+}
+
+- (BOOL)showAuthenticationDialog
+{
+// Mac authentication dialog coming soon!
+#if TARGET_OS_IPHONE
+	// Cannot show the dialog when we are running on the main thread, as the locks will cause the app to hang
+	if ([self shouldPresentAuthenticationDialog] && ![NSThread isMainThread]) {
+		[ASIAuthenticationDialog performSelectorOnMainThread:@selector(presentAuthenticationDialogForRequest:) withObject:self waitUntilDone:[NSThread isMainThread]];
+		[[self authenticationLock] lockWhenCondition:2];
+		[[self authenticationLock] unlockWithCondition:1];
+		if ([self error]) {
+			return NO;
+		}
+		return YES;
+	}
+	return NO;
+#else
+	return NO;
+#endif
+}
+
+- (BOOL)askDelegateForCredentials
+{
+	// Can't use delegate authentication when running on the main thread
+	if ([NSThread isMainThread]) {
+		return NO;
+	}
+	
+	// If we have a delegate, we'll see if it can handle proxyAuthenticationNeededForRequest:.
+	// Otherwise, we'll try the queue (if this request is part of one) and it will pass the message on to its own delegate
+	id authenticationDelegate = [self delegate];
+	if (!authenticationDelegate) {
+		authenticationDelegate = [self queue];
+	}
+	
+	if ([authenticationDelegate respondsToSelector:@selector(authenticationNeededForRequest:)]) {
+		[authenticationDelegate performSelectorOnMainThread:@selector(authenticationNeededForRequest:) withObject:self waitUntilDone:[NSThread isMainThread]];
+		[[self authenticationLock] lockWhenCondition:2];
+		[[self authenticationLock] unlockWithCondition:1];
+		
+		// Was the request cancelled?
+		if ([self error] || [[self mainRequest] error]) {
+			return NO;
+		}
+		return YES;
+	}
+	return NO;
 }
 
 - (void)attemptToApplyCredentialsAndResume
 {
+	if ([self error] || [self isCancelled]) {
+		return;
+	}
+	
+	if ([self needsProxyAuthentication]) {
+		[self attemptToApplyProxyCredentialsAndResume];
+		return;
+	}
 	
 	// Read authentication data
 	if (!requestAuthentication) {
 		CFHTTPMessageRef responseHeader = (CFHTTPMessageRef) CFReadStreamCopyProperty(readStream,kCFStreamPropertyHTTPResponseHeader);
 		requestAuthentication = CFHTTPAuthenticationCreateFromResponse(NULL, responseHeader);
 		CFRelease(responseHeader);
-		authenticationMethod = (NSString *)CFHTTPAuthenticationCopyMethod(requestAuthentication);
+		[self setAuthenticationScheme:[(NSString *)CFHTTPAuthenticationCopyMethod(requestAuthentication) autorelease]];
 	}
-
 	
 	if (!requestAuthentication) {
+		[self cancelLoad];
 		[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIInternalErrorWhileApplyingCredentialsType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"Failed to get authentication object from response headers",NSLocalizedDescriptionKey,nil]]];
 		return;
+	}
+	
+	// Get the authentication realm
+	[self setAuthenticationRealm:nil];
+	if (!CFHTTPAuthenticationRequiresAccountDomain(requestAuthentication)) {
+		[self setAuthenticationRealm:[(NSString *)CFHTTPAuthenticationCopyRealm(requestAuthentication) autorelease]];
 	}
 	
 	// See if authentication is valid
@@ -1242,27 +1784,46 @@ static NSError *ASITooMuchRedirectionError;
 		// check for bad credentials, so we can give the delegate a chance to replace them
 		if (err.domain == kCFStreamErrorDomainHTTP && (err.error == kCFStreamErrorHTTPAuthenticationBadUserName || err.error == kCFStreamErrorHTTPAuthenticationBadPassword)) {
 			
+			// Prevent more than one request from asking for credentials at once
+			[delegateAuthenticationLock lock];
+			
+			// We know the credentials we just presented are bad, we should remove them from the session store too
+			[[self class] removeAuthenticationCredentialsFromSessionStore:requestCredentials];
 			[self setRequestCredentials:nil];
+			
+			// If the user cancelled authentication via a dialog presented by another request, our queue may have cancelled us
+			if ([self error] || [self isCancelled]) {
+				[delegateAuthenticationLock unlock];
+				return;
+			}
+			
+			// Now we've acquired the lock, it may be that the session contains credentials we can re-use for this request
+			if ([self useSessionPersistance]) {
+				NSDictionary *credentials = [self findSessionAuthenticationCredentials];
+				if (credentials && [self applyCredentials:[credentials objectForKey:@"Credentials"]]) {
+					[delegateAuthenticationLock unlock];
+					[self startRequest];
+					return;
+				}
+			}
+			
+			
 			
 			[self setLastActivityTime:nil];
 			
-			// If we have a delegate, we'll see if it can handle authorizationNeededForRequest.
-			// Otherwise, we'll try the queue (if this request is part of one) and it will pass the message on to its own delegate
-			id authorizationDelegate = [self delegate];
-			if (!authorizationDelegate) {
-				authorizationDelegate = [self queue];
-			}
-			
-			if ([authorizationDelegate respondsToSelector:@selector(authorizationNeededForRequest:)]) {
-				[authorizationDelegate performSelectorOnMainThread:@selector(authorizationNeededForRequest:) withObject:self waitUntilDone:[NSThread isMainThread]];
-				[authenticationLock lockWhenCondition:2];
-				[authenticationLock unlock];
-				
-				// Hopefully, the delegate gave us some credentials, let's apply them and reload
+			if ([self askDelegateForCredentials]) {
 				[self attemptToApplyCredentialsAndResume];
+				[delegateAuthenticationLock unlock];
 				return;
 			}
+			if ([self showAuthenticationDialog]) {
+				[self attemptToApplyCredentialsAndResume];
+				[delegateAuthenticationLock unlock];
+				return;
+			}
+			[delegateAuthenticationLock unlock];
 		}
+		[self cancelLoad];
 		[self failWithError:ASIAuthenticationError];
 		return;
 	}
@@ -1270,56 +1831,75 @@ static NSError *ASITooMuchRedirectionError;
 	[self cancelLoad];
 	
 	if (requestCredentials) {
-
-		if (((authenticationMethod != (NSString *)kCFHTTPAuthenticationSchemeNTLM) || authenticationRetryCount < 2) && [self applyCredentials:requestCredentials]) {
+		
+		if ((([self authenticationScheme] != (NSString *)kCFHTTPAuthenticationSchemeNTLM) || [self authenticationRetryCount] < 2) && [self applyCredentials:requestCredentials]) {
 			[self startRequest];
 			
-		// We've failed NTLM authentication twice, we should assume our credentials are wrong
-		} else if (authenticationMethod == (NSString *)kCFHTTPAuthenticationSchemeNTLM && authenticationRetryCount == 2) {
+			// We've failed NTLM authentication twice, we should assume our credentials are wrong
+		} else if ([self authenticationScheme] == (NSString *)kCFHTTPAuthenticationSchemeNTLM && [self authenticationRetryCount ] == 2) {
 			[self failWithError:ASIAuthenticationError];
-	
+			
 		} else {
 			[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIInternalErrorWhileApplyingCredentialsType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"Failed to apply credentials to request",NSLocalizedDescriptionKey,nil]]];
 		}
 		
-	// Are a user name & password needed?
+		// Are a user name & password needed?
 	}  else if (CFHTTPAuthenticationRequiresUserNameAndPassword(requestAuthentication)) {
 		
+		// Prevent more than one request from asking for credentials at once
+		[delegateAuthenticationLock lock];
+		
+		// If the user cancelled authentication via a dialog presented by another request, our queue may have cancelled us
+		if ([self error] || [self isCancelled]) {
+			[delegateAuthenticationLock unlock];
+			return;
+		}
+		
+		// Now we've acquired the lock, it may be that the session contains credentials we can re-use for this request
+		if ([self useSessionPersistance]) {
+			NSDictionary *credentials = [self findSessionAuthenticationCredentials];
+			if (credentials && [self applyCredentials:[credentials objectForKey:@"Credentials"]]) {
+				[delegateAuthenticationLock unlock];
+				[self startRequest];
+				return;
+			}
+		}
+		
+
 		NSMutableDictionary *newCredentials = [self findCredentials];
 		
 		//If we have some credentials to use let's apply them to the request and continue
 		if (newCredentials) {
 			
 			if ([self applyCredentials:newCredentials]) {
+				[delegateAuthenticationLock unlock];
 				[self startRequest];
 			} else {
+				[delegateAuthenticationLock unlock];
 				[self failWithError:[NSError errorWithDomain:NetworkRequestErrorDomain code:ASIInternalErrorWhileApplyingCredentialsType userInfo:[NSDictionary dictionaryWithObjectsAndKeys:@"Failed to apply credentials to request",NSLocalizedDescriptionKey,nil]]];
 			}
 			return;
 		}
-		
-		// We've got no credentials, let's ask the delegate to sort this out
-		// If we have a delegate, we'll see if it can handle authorizationNeededForRequest.
-		// Otherwise, we'll try the queue (if this request is part of one) and it will pass the message on to its own delegate
-		id authorizationDelegate = [self delegate];
-		if (!authorizationDelegate) {
-			authorizationDelegate = [self queue];
-		}
-		
-		if ([authorizationDelegate respondsToSelector:@selector(authorizationNeededForRequest:)]) {
-			[authorizationDelegate performSelectorOnMainThread:@selector(authorizationNeededForRequest:) withObject:self waitUntilDone:[NSThread isMainThread]];
-			[authenticationLock lockWhenCondition:2];
-			[authenticationLock unlock];
+		if ([self askDelegateForCredentials]) {
 			[self attemptToApplyCredentialsAndResume];
+			[delegateAuthenticationLock unlock];
 			return;
 		}
 		
-		// The delegate isn't interested, we'll have to give up
+		if ([self showAuthenticationDialog]) {
+			[self attemptToApplyCredentialsAndResume];
+			[delegateAuthenticationLock unlock];
+			return;
+		}
+		[delegateAuthenticationLock unlock];
+		
 		[self failWithError:ASIAuthenticationError];
+
 		return;
 	}
 	
 }
+
 
 #pragma mark stream status handlers
 
@@ -1365,6 +1945,28 @@ static NSError *ASITooMuchRedirectionError;
 		bufferSize = 16384;
 	}
 	
+	// Reduce the buffer size if we're receiving data too quickly when bandwidth throttling is active
+	// This just augments the throttling done in measureBandwidthUsage to reduce the amount we go over the limit
+	
+	if ([[self class] isBandwidthThrottled]) {
+		[bandwidthThrottlingLock lock];
+		if (maxBandwidthPerSecond > 0) {
+			long long maxSize  = (long long)maxBandwidthPerSecond-(long long)bandwidthUsedInLastSecond;
+			if (maxSize < 0) {
+				// We aren't supposed to read any more data right now, but we'll read a single byte anyway so the CFNetwork's buffer isn't full
+				bufferSize = 1;
+			} else if (maxSize/4 < bufferSize) {
+				// We were going to fetch more data that we should be allowed, so we'll reduce the size of our read
+				bufferSize = maxSize/4;
+			}
+		}
+		if (bufferSize < 1) {
+			bufferSize = 1;
+		}
+		[bandwidthThrottlingLock unlock];
+	}
+
+	
     UInt8 buffer[bufferSize];
     CFIndex bytesRead = CFReadStreamRead(readStream, buffer, sizeof(buffer));
 	
@@ -1377,6 +1979,10 @@ static NSError *ASITooMuchRedirectionError;
     } else if (bytesRead) {
 		
 		[self setTotalBytesRead:[self totalBytesRead]+bytesRead];
+		[self setLastActivityTime:[NSDate date]];
+		
+		// For bandwidth measurement / throttling
+		[ASIHTTPRequest incrementBandwidthUsedInLastSecond:bytesRead];
 		
 		// Are we downloading to a file?
 		if ([self downloadDestinationPath]) {
@@ -1388,10 +1994,10 @@ static NSError *ASITooMuchRedirectionError;
 					append = YES;
 				}
 				
-				[self setFileDownloadOutputStream:[[[NSOutputStream alloc] initToFileAtPath:temporaryFileDownloadPath append:append] autorelease]];
-				[fileDownloadOutputStream open];
+				[self setFileDownloadOutputStream:[[[NSOutputStream alloc] initToFileAtPath:[self temporaryFileDownloadPath] append:append] autorelease]];
+				[[self fileDownloadOutputStream] open];
 			}
-			[fileDownloadOutputStream write:buffer maxLength:bytesRead];
+			[[self fileDownloadOutputStream] write:buffer maxLength:bytesRead];
 			
 		//Otherwise, let's add the data to our in-memory store
 		} else {
@@ -1419,11 +2025,11 @@ static NSError *ASITooMuchRedirectionError;
 	
 	[[self cancelledLock] lock];
     if (readStream) {
-        CFReadStreamClose(readStream);
-        CFReadStreamSetClient(readStream, kCFStreamEventNone, NULL, NULL);
-        CFReadStreamUnscheduleFromRunLoop(readStream, CFRunLoopGetCurrent(), ASIHTTPRequestRunMode);
-        CFRelease(readStream);
-        readStream = NULL;
+		CFReadStreamSetClient(readStream, kCFStreamEventNone, NULL, NULL);
+		CFReadStreamUnscheduleFromRunLoop(readStream, CFRunLoopGetCurrent(), ASIHTTPRequestRunMode);
+		CFReadStreamClose(readStream);
+		CFRelease(readStream);
+		readStream = NULL;
     }
 	
 	[[self postBodyReadStream] close];
@@ -1431,19 +2037,19 @@ static NSError *ASITooMuchRedirectionError;
 	NSError *fileError = nil;
 	
 	// Delete up the request body temporary file, if it exists
-	if (didCreateTemporaryPostDataFile) {
+	if ([self didCreateTemporaryPostDataFile]) {
 		[self removePostDataFile];
 	}
 	
 	// Close the output stream as we're done writing to the file
-	if (temporaryFileDownloadPath) {
-		[fileDownloadOutputStream close];
+	if ([self temporaryFileDownloadPath]) {
+		[[self fileDownloadOutputStream] close];
 		
 		// Decompress the file (if necessary) directly to the destination path
 		if ([self isResponseCompressed]) {
-			int decompressionStatus = [ASIHTTPRequest uncompressZippedDataFromFile:temporaryFileDownloadPath toFile:downloadDestinationPath];
+			int decompressionStatus = [ASIHTTPRequest uncompressZippedDataFromFile:[self temporaryFileDownloadPath] toFile:[self downloadDestinationPath]];
 			if (decompressionStatus != Z_OK) {
-				fileError = [NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Decompression of %@ failed with code %hi",temporaryFileDownloadPath,decompressionStatus],NSLocalizedDescriptionKey,nil]];
+				fileError = [NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Decompression of %@ failed with code %hi",[self temporaryFileDownloadPath],decompressionStatus],NSLocalizedDescriptionKey,nil]];
 			}
 				
 			[self removeTemporaryDownloadFile];
@@ -1451,19 +2057,20 @@ static NSError *ASITooMuchRedirectionError;
 					
 			//Remove any file at the destination path
 			NSError *moveError = nil;
-			if ([[NSFileManager defaultManager] fileExistsAtPath:downloadDestinationPath]) {
-				[[NSFileManager defaultManager] removeItemAtPath:downloadDestinationPath error:&moveError];
+			if ([[NSFileManager defaultManager] fileExistsAtPath:[self downloadDestinationPath]]) {
+				[[NSFileManager defaultManager] removeItemAtPath:[self downloadDestinationPath] error:&moveError];
 				if (moveError) {
-					fileError = [NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Unable to remove file at path '%@'",downloadDestinationPath],NSLocalizedDescriptionKey,moveError,NSUnderlyingErrorKey,nil]];
+					fileError = [NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Unable to remove file at path '%@'",[self downloadDestinationPath]],NSLocalizedDescriptionKey,moveError,NSUnderlyingErrorKey,nil]];
 				}
 			}
 					
 			//Move the temporary file to the destination path
 			if (!fileError) {
-				[[NSFileManager defaultManager] moveItemAtPath:temporaryFileDownloadPath toPath:downloadDestinationPath error:&moveError];
+				[[NSFileManager defaultManager] moveItemAtPath:[self temporaryFileDownloadPath] toPath:[self downloadDestinationPath] error:&moveError];
 				if (moveError) {
-					fileError = [NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Failed to move file from '%@' to '%@'",temporaryFileDownloadPath,downloadDestinationPath],NSLocalizedDescriptionKey,moveError,NSUnderlyingErrorKey,nil]];
+					fileError = [NSError errorWithDomain:NetworkRequestErrorDomain code:ASIFileManagementError userInfo:[NSDictionary dictionaryWithObjectsAndKeys:[NSString stringWithFormat:@"Failed to move file from '%@' to '%@'",[self temporaryFileDownloadPath],[self downloadDestinationPath]],NSLocalizedDescriptionKey,moveError,NSUnderlyingErrorKey,nil]];
 				}
+				[self setTemporaryFileDownloadPath:nil];
 			}
 		}
 	}
@@ -1504,65 +2111,164 @@ static NSError *ASITooMuchRedirectionError;
     [super cancel];
 }
 
-#pragma mark managing the session
+#pragma mark global queue
 
-+ (void)setSessionCredentials:(NSMutableDictionary *)newCredentials
++ (NSOperationQueue *)sharedRequestQueue
 {
-	[sessionCredentials release];
-	sessionCredentials = [newCredentials retain];
+	if (!sharedRequestQueue) {
+		sharedRequestQueue = [[NSOperationQueue alloc] init];
+		[sharedRequestQueue setMaxConcurrentOperationCount:YES];
+	}
+	return sharedRequestQueue;
 }
 
-+ (void)setSessionAuthentication:(CFHTTPAuthenticationRef)newAuthentication
+# pragma mark session credentials
+
++ (NSMutableArray *)sessionProxyCredentialsStore
 {
-	if (sessionAuthentication) {
-		CFRelease(sessionAuthentication);
+	if (!sessionProxyCredentialsStore) {
+		sessionProxyCredentialsStore = [[NSMutableArray alloc] init];
 	}
-	sessionAuthentication = newAuthentication;
-	if (newAuthentication) {
-		CFRetain(sessionAuthentication);
+	return sessionProxyCredentialsStore;
+}
+
++ (NSMutableArray *)sessionCredentialsStore
+{
+	if (!sessionCredentialsStore) {
+		sessionCredentialsStore = [[NSMutableArray alloc] init];
 	}
+	return sessionCredentialsStore;
+}
+
++ (void)storeProxyAuthenticationCredentialsInSessionStore:(NSDictionary *)credentials
+{
+	[sessionCredentialsLock lock];
+	[self removeProxyAuthenticationCredentialsFromSessionStore:[credentials objectForKey:@"Credentials"]];
+	[[[self class] sessionProxyCredentialsStore] addObject:credentials];
+	[sessionCredentialsLock unlock];
+}
+
++ (void)storeAuthenticationCredentialsInSessionStore:(NSDictionary *)credentials
+{
+	[sessionCredentialsLock lock];
+	[self removeAuthenticationCredentialsFromSessionStore:[credentials objectForKey:@"Credentials"]];
+	[[[self class] sessionCredentialsStore] addObject:credentials];
+	[sessionCredentialsLock unlock];
+}
+
++ (void)removeProxyAuthenticationCredentialsFromSessionStore:(NSDictionary *)credentials
+{
+	[sessionCredentialsLock lock];
+	NSMutableArray *sessionCredentialsList = [[self class] sessionProxyCredentialsStore];
+	int i;
+	for (i=0; i<[sessionCredentialsList count]; i++) {
+		NSDictionary *theCredentials = [sessionCredentialsList objectAtIndex:i];
+		if ([theCredentials objectForKey:@"Credentials"] == credentials) {
+			[sessionCredentialsList removeObjectAtIndex:i];
+			[sessionCredentialsLock unlock];
+			return;
+		}
+	}
+	[sessionCredentialsLock unlock];
+}
+
++ (void)removeAuthenticationCredentialsFromSessionStore:(NSDictionary *)credentials
+{
+	[sessionCredentialsLock lock];
+	NSMutableArray *sessionCredentialsList = [[self class] sessionCredentialsStore];
+	int i;
+	for (i=0; i<[sessionCredentialsList count]; i++) {
+		NSDictionary *theCredentials = [sessionCredentialsList objectAtIndex:i];
+		if ([theCredentials objectForKey:@"Credentials"] == credentials) {
+			[sessionCredentialsList removeObjectAtIndex:i];
+			[sessionCredentialsLock unlock];
+			return;
+		}
+	}
+	[sessionCredentialsLock unlock];
+}
+
+- (NSDictionary *)findSessionProxyAuthenticationCredentials
+{
+	[sessionCredentialsLock lock];
+	NSMutableArray *sessionCredentialsList = [[self class] sessionProxyCredentialsStore];
+	for (NSDictionary *theCredentials in sessionCredentialsList) {
+		if ([[theCredentials objectForKey:@"Host"] isEqualToString:[self proxyHost]] && [[theCredentials objectForKey:@"Port"] intValue] == [self proxyPort]) {
+			[sessionCredentialsLock unlock];
+			return theCredentials;
+		}
+	}
+	[sessionCredentialsLock unlock];
+	return nil;
+}
+
+
+- (NSDictionary *)findSessionAuthenticationCredentials
+{
+	[sessionCredentialsLock lock];
+	NSMutableArray *sessionCredentialsList = [[self class] sessionCredentialsStore];
+	// Find an exact match
+	for (NSDictionary *theCredentials in sessionCredentialsList) {
+		if ([[theCredentials objectForKey:@"URL"] isEqual:[self url]]) {
+			if (![self responseStatusCode] || [[theCredentials objectForKey:@"AuthenticationRealm"] isEqualToString:[self authenticationRealm]]) {
+				[sessionCredentialsLock unlock];
+				return theCredentials;
+			}
+		}
+	}
+	// Find a rough match
+	NSURL *requestURL = [self url];
+	for (NSDictionary *theCredentials in sessionCredentialsList) {
+		NSURL *theURL = [theCredentials objectForKey:@"URL"];
+		if ([[theURL host] isEqualToString:[requestURL host]] && [[theURL port] isEqualToNumber:[requestURL port]] && [[theURL scheme] isEqualToString:[requestURL scheme]]) {
+			if (![self responseStatusCode] || [[theCredentials objectForKey:@"AuthenticationRealm"] isEqualToString:[self authenticationRealm]]) {
+				[sessionCredentialsLock unlock];
+				return theCredentials;
+			}
+		}
+	}
+	[sessionCredentialsLock unlock];
+	return nil;
 }
 
 #pragma mark keychain storage
 
 + (void)saveCredentials:(NSURLCredential *)credentials forHost:(NSString *)host port:(int)port protocol:(NSString *)protocol realm:(NSString *)realm
 {
-	NSURLProtectionSpace *protectionSpace = [[[NSURLProtectionSpace alloc] initWithHost:host
-																				   port:port
-																			   protocol:protocol
-																				  realm:realm
-																   authenticationMethod:NSURLAuthenticationMethodDefault] autorelease];
-	
-	
-	NSURLCredentialStorage *storage = [NSURLCredentialStorage sharedCredentialStorage];
-	[storage setDefaultCredential:credentials forProtectionSpace:protectionSpace];
+	NSURLProtectionSpace *protectionSpace = [[[NSURLProtectionSpace alloc] initWithHost:host port:port protocol:protocol realm:realm authenticationMethod:NSURLAuthenticationMethodDefault] autorelease];
+	[[NSURLCredentialStorage sharedCredentialStorage] setDefaultCredential:credentials forProtectionSpace:protectionSpace];
+}
+
++ (void)saveCredentials:(NSURLCredential *)credentials forProxy:(NSString *)host port:(int)port realm:(NSString *)realm
+{
+	NSURLProtectionSpace *protectionSpace = [[[NSURLProtectionSpace alloc] initWithProxyHost:host port:port type:NSURLProtectionSpaceHTTPProxy realm:realm authenticationMethod:NSURLAuthenticationMethodDefault] autorelease];
+	[[NSURLCredentialStorage sharedCredentialStorage] setDefaultCredential:credentials forProtectionSpace:protectionSpace];
 }
 
 + (NSURLCredential *)savedCredentialsForHost:(NSString *)host port:(int)port protocol:(NSString *)protocol realm:(NSString *)realm
 {
-	NSURLProtectionSpace *protectionSpace = [[[NSURLProtectionSpace alloc] initWithHost:host
-																				   port:port
-																			   protocol:protocol
-																				  realm:realm
-																   authenticationMethod:NSURLAuthenticationMethodDefault] autorelease];
-	
-	
-	NSURLCredentialStorage *storage = [NSURLCredentialStorage sharedCredentialStorage];
-	return [storage defaultCredentialForProtectionSpace:protectionSpace];
+	NSURLProtectionSpace *protectionSpace = [[[NSURLProtectionSpace alloc] initWithHost:host port:port protocol:protocol realm:realm authenticationMethod:NSURLAuthenticationMethodDefault] autorelease];
+	return [[NSURLCredentialStorage sharedCredentialStorage] defaultCredentialForProtectionSpace:protectionSpace];
+}
+
++ (NSURLCredential *)savedCredentialsForProxy:(NSString *)host port:(int)port protocol:(NSString *)protocol realm:(NSString *)realm
+{
+	NSURLProtectionSpace *protectionSpace = [[[NSURLProtectionSpace alloc] initWithProxyHost:host port:port type:NSURLProtectionSpaceHTTPProxy realm:realm authenticationMethod:NSURLAuthenticationMethodDefault] autorelease];
+	return [[NSURLCredentialStorage sharedCredentialStorage] defaultCredentialForProtectionSpace:protectionSpace];
 }
 
 + (void)removeCredentialsForHost:(NSString *)host port:(int)port protocol:(NSString *)protocol realm:(NSString *)realm
 {
-	NSURLProtectionSpace *protectionSpace = [[[NSURLProtectionSpace alloc] initWithHost:host
-																				   port:port
-																			   protocol:protocol
-																				  realm:realm
-																   authenticationMethod:NSURLAuthenticationMethodDefault] autorelease];
-	
-	
+	NSURLProtectionSpace *protectionSpace = [[[NSURLProtectionSpace alloc] initWithHost:host port:port protocol:protocol realm:realm authenticationMethod:NSURLAuthenticationMethodDefault] autorelease];
 	NSURLCredentialStorage *storage = [NSURLCredentialStorage sharedCredentialStorage];
 	[storage removeCredential:[storage defaultCredentialForProtectionSpace:protectionSpace] forProtectionSpace:protectionSpace];
-	
+}
+
++ (void)removeCredentialsForProxy:(NSString *)host port:(int)port realm:(NSString *)realm
+{
+	NSURLProtectionSpace *protectionSpace = [[[NSURLProtectionSpace alloc] initWithProxyHost:host port:port type:NSURLProtectionSpaceHTTPProxy realm:realm authenticationMethod:NSURLAuthenticationMethodDefault] autorelease];
+	NSURLCredentialStorage *storage = [NSURLCredentialStorage sharedCredentialStorage];
+	[storage removeCredential:[storage defaultCredentialForProtectionSpace:protectionSpace] forProtectionSpace:protectionSpace];
 }
 
 
@@ -1576,16 +2282,19 @@ static NSError *ASITooMuchRedirectionError;
 
 + (void)setSessionCookies:(NSMutableArray *)newSessionCookies
 {
+	[sessionCookiesLock lock];
 	// Remove existing cookies from the persistent store
 	for (NSHTTPCookie *cookie in sessionCookies) {
 		[[NSHTTPCookieStorage sharedHTTPCookieStorage] deleteCookie:cookie];
 	}
 	[sessionCookies release];
 	sessionCookies = [newSessionCookies retain];
+	[sessionCookiesLock unlock];
 }
 
 + (void)addSessionCookie:(NSHTTPCookie *)newCookie
 {
+	[sessionCookiesLock lock];
 	NSHTTPCookie *cookie;
 	int i;
 	int max = [[ASIHTTPRequest sessionCookies] count];
@@ -1597,14 +2306,16 @@ static NSError *ASITooMuchRedirectionError;
 		}
 	}
 	[[ASIHTTPRequest sessionCookies] addObject:newCookie];
+	[sessionCookiesLock unlock];
 }
 
 // Dump all session data (authentication and cookies)
 + (void)clearSession
 {
-	[ASIHTTPRequest setSessionAuthentication:NULL];
-	[ASIHTTPRequest setSessionCredentials:nil];
-	[ASIHTTPRequest setSessionCookies:nil];
+	[sessionCredentialsLock lock];
+	[[[self class] sessionCredentialsStore] removeAllObjects];
+	[sessionCredentialsLock unlock];
+	[[self class] setSessionCookies:nil];
 }
 
 #pragma mark gzip decompression
@@ -1664,7 +2375,9 @@ static NSError *ASITooMuchRedirectionError;
 + (int)uncompressZippedDataFromFile:(NSString *)sourcePath toFile:(NSString *)destinationPath
 {
 	// Create an empty file at the destination path
-	[[NSFileManager defaultManager] createFileAtPath:destinationPath contents:[NSData data] attributes:nil];
+	if (![[NSFileManager defaultManager] createFileAtPath:destinationPath contents:[NSData data] attributes:nil]) {
+		return 1;
+	}
 	
 	// Get a FILE struct for the source file
 	NSFileHandle *inputFileHandle = [NSFileHandle fileHandleForReadingAtPath:sourcePath];
@@ -1892,8 +2605,21 @@ static NSError *ASITooMuchRedirectionError;
 	if (!appName) {
 		return nil;
 	}
-	NSString *appVersion = [bundle objectForInfoDictionaryKey:@"CFBundleVersion"];
-	NSString *deviceName;;
+	NSString *appVersion = nil;
+	NSString *marketingVersionNumber = [bundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    NSString *developmentVersionNumber = [bundle objectForInfoDictionaryKey:@"CFBundleVersion"];
+	if (marketingVersionNumber && developmentVersionNumber) {
+		if ([marketingVersionNumber isEqualToString:developmentVersionNumber]) {
+			appVersion = marketingVersionNumber;
+		} else {
+			appVersion = [NSString stringWithFormat:@"%@ rv:%@",marketingVersionNumber,developmentVersionNumber];
+		}
+	} else {
+		appVersion = (marketingVersionNumber ? marketingVersionNumber : developmentVersionNumber);
+	}
+	
+	
+	NSString *deviceName;
 	NSString *OSName;
 	NSString *OSVersion;
 	
@@ -1923,11 +2649,238 @@ static NSError *ASITooMuchRedirectionError;
 	return [NSString stringWithFormat:@"%@ %@ (%@; %@ %@; %@)", appName, appVersion, deviceName, OSName, OSVersion, locale];
 }
 
+#pragma mark proxy autoconfiguration
+
+// Returns an array of proxies to use for a particular url, given the url of a PAC script
++ (NSArray *)proxiesForURL:(NSURL *)theURL fromPAC:(NSURL *)pacScriptURL
+{
+	// From: http://developer.apple.com/samplecode/CFProxySupportTool/listing1.html
+	// Work around <rdar://problem/5530166>.  This dummy call to 
+	// CFNetworkCopyProxiesForURL initialise some state within CFNetwork 
+	// that is required by CFNetworkCopyProxiesForAutoConfigurationScript.
+	CFRelease(CFNetworkCopyProxiesForURL((CFURLRef)theURL, NULL));
+	
+	NSStringEncoding encoding;
+	NSError *err = nil;
+	NSString *script = [NSString stringWithContentsOfURL:pacScriptURL usedEncoding:&encoding error:&err];
+	if (err) {
+		return nil;
+	}
+	// Obtain the list of proxies by running the autoconfiguration script
+#if TARGET_OS_IPHONE && __IPHONE_OS_VERSION_MIN_REQUIRED < IPHONE_3_0
+	NSArray *proxies = [(NSArray *)CFNetworkCopyProxiesForAutoConfigurationScript((CFStringRef)script,(CFURLRef)theURL) autorelease];
+#else
+	CFErrorRef err2 = NULL;
+	NSArray *proxies = [(NSArray *)CFNetworkCopyProxiesForAutoConfigurationScript((CFStringRef)script,(CFURLRef)theURL, &err2) autorelease];
+	if (err2) {
+		return nil;
+	}
+#endif
+	return proxies;
+}
+
+#pragma mark mime-type detection
+
++ (NSString *)mimeTypeForFileAtPath:(NSString *)path
+{
+	// NSTask does seem to exist in the 2.2.1 SDK, though it's not in the 3.0 SDK. It's probably best if we just use a generic mime type on iPhone all the time.
+#if TARGET_OS_IPHONE
+	return @"application/octet-stream";
+	
+	// Grab the mime type using an NSTask to run the 'file' program, with the Mac OS-specific parameters to grab the mime type
+	// Perhaps there is a better way to do this?
+#else
+	NSTask *task = [[[NSTask alloc] init] autorelease];
+	[task setLaunchPath: @"/usr/bin/file"];
+	[task setArguments:[NSMutableArray arrayWithObjects:@"-Ib",path,nil]];
+	
+    NSPipe *outputPipe = [NSPipe pipe];
+    [task setStandardOutput:outputPipe];
+	
+    NSFileHandle *file = [outputPipe fileHandleForReading];
+	
+	[task launch];
+	[task waitUntilExit];
+	
+	if ([task terminationStatus] != 0) {
+		return @"application/octet-stream";	
+	}
+	
+	NSString *mimeTypeString = [[[[NSString alloc] initWithData:[file readDataToEndOfFile] encoding: NSUTF8StringEncoding] autorelease] stringByReplacingOccurrencesOfString:@"\n" withString:@""];
+	return [[mimeTypeString componentsSeparatedByString:@";"] objectAtIndex:0];
+#endif
+}
+
+#pragma mark bandwidth measurement / throttling
+
++ (BOOL)isBandwidthThrottled
+{
+#if TARGET_OS_IPHONE
+	[bandwidthThrottlingLock lock];
+
+	BOOL throttle = isBandwidthThrottled || (!shouldThrottleBandwithForWWANOnly && (maxBandwidthPerSecond));
+	[bandwidthThrottlingLock unlock];
+	return throttle;
+#else
+	[bandwidthThrottlingLock lock];
+	BOOL throttle = (maxBandwidthPerSecond);
+	[bandwidthThrottlingLock unlock];
+	return throttle;
+#endif
+}
+
++ (unsigned long)maxBandwidthPerSecond
+{
+	[bandwidthThrottlingLock lock];
+	unsigned long amount = maxBandwidthPerSecond;
+	[bandwidthThrottlingLock unlock];
+	return amount;
+}
+
++ (void)setMaxBandwidthPerSecond:(unsigned long)bytes
+{
+	[bandwidthThrottlingLock lock];
+	maxBandwidthPerSecond = bytes;
+	[bandwidthThrottlingLock unlock];
+}
+
++ (void)incrementBandwidthUsedInLastSecond:(unsigned long)bytes
+{
+	[bandwidthThrottlingLock lock];
+	bandwidthUsedInLastSecond += bytes;
+	//NSLog(@"used in last second: %lu",bandwidthUsedInLastSecond);
+	[bandwidthThrottlingLock unlock];
+}
+
++ (void)recordBandwidthUsage
+{
+	if (bandwidthUsedInLastSecond == 0) {
+		[bandwidthUsageTracker removeAllObjects];
+	} else {
+		NSTimeInterval interval = [bandwidthMeasurementDate timeIntervalSinceNow];
+		while ((interval < 0 || [bandwidthUsageTracker count] > 5) && [bandwidthUsageTracker count] > 0) {
+			[bandwidthUsageTracker removeObjectAtIndex:0];
+			interval++;
+		}
+	}
+	//NSLog(@"Used: %qi",bandwidthUsedInLastSecond);
+	[bandwidthUsageTracker addObject:[NSNumber numberWithUnsignedLong:bandwidthUsedInLastSecond]];
+	[bandwidthMeasurementDate release];
+	bandwidthMeasurementDate = [[NSDate dateWithTimeIntervalSinceNow:1] retain];
+	bandwidthUsedInLastSecond = 0;
+	
+	int measurements = [bandwidthUsageTracker count];
+	unsigned long long totalBytes = 0;
+	for (NSNumber *bytes in bandwidthUsageTracker) {
+		totalBytes += [bytes unsignedLongValue];
+	}
+	averageBandwidthUsedPerSecond = totalBytes/measurements;		
+}
+
++ (unsigned long)averageBandwidthUsedPerSecond
+{
+	[bandwidthThrottlingLock lock];
+	
+	if (!bandwidthMeasurementDate || [bandwidthMeasurementDate timeIntervalSinceNow] < 0) {
+		[self recordBandwidthUsage];
+	}
+	unsigned long amount = 	averageBandwidthUsedPerSecond;
+	[bandwidthThrottlingLock unlock];
+	return amount;
+}
+
++ (void)measureBandwidthUsage
+{
+	// Other requests may have to wait for this lock if we're sleeping, but this is fine, since in that case we already know they shouldn't be sending or receiving data
+	[bandwidthThrottlingLock lock];
+
+	if (!bandwidthMeasurementDate || [bandwidthMeasurementDate timeIntervalSinceNow] < -0) {
+		[self recordBandwidthUsage];
+	}
+	
+	// Are we performing bandwidth throttling?
+	if (maxBandwidthPerSecond > 0) {	
+		// How much data can we still send or receive this second?
+		long long bytesRemaining = (long long)maxBandwidthPerSecond - (long long)bandwidthUsedInLastSecond;
+				
+		// Have we used up our allowance?
+		if (bytesRemaining < 8) {
+			
+			// Yes, put this request to sleep until a second is up
+			[NSThread sleepUntilDate:bandwidthMeasurementDate];
+			[self recordBandwidthUsage];
+		}
+	}
+	[bandwidthThrottlingLock unlock];
+}
+
+#if TARGET_OS_IPHONE
++ (void)setShouldThrottleBandwidthForWWAN:(BOOL)throttle
+{
+	if (throttle) {
+		[ASIHTTPRequest throttleBandwidthForWWANUsingLimit:ASIWWANBandwidthThrottleAmount];
+	} else {
+		[[NSNotificationCenter defaultCenter] removeObserver:self name:@"kNetworkReachabilityChangedNotification" object:nil];
+		[ASIHTTPRequest setMaxBandwidthPerSecond:0];
+		[bandwidthThrottlingLock lock];
+		shouldThrottleBandwithForWWANOnly = NO;
+		[bandwidthThrottlingLock unlock];
+	}
+}
+
++ (void)throttleBandwidthForWWANUsingLimit:(unsigned long)limit
+{	
+	[bandwidthThrottlingLock lock];
+	shouldThrottleBandwithForWWANOnly = YES;
+	maxBandwidthPerSecond = limit;
+	[[Reachability sharedReachability] setNetworkStatusNotificationsEnabled:YES];
+	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reachabilityChanged:) name:@"kNetworkReachabilityChangedNotification" object:nil];
+	[bandwidthThrottlingLock unlock];
+	[ASIHTTPRequest reachabilityChanged:nil];
+}
+
++ (void)reachabilityChanged:(NSNotification *)note
+{
+	[bandwidthThrottlingLock lock];	
+	if ([[Reachability sharedReachability] internetConnectionStatus] == ReachableViaCarrierDataNetwork) {
+		isBandwidthThrottled = YES;
+	} else {
+		isBandwidthThrottled = NO;
+	}
+	[bandwidthThrottlingLock unlock];
+}
+#endif
+
++ (unsigned long)maxUploadReadLength
+{
+
+	[bandwidthThrottlingLock lock];
+	
+	// We'll split our bandwidth allowance into 4 (which is the default for an ASINetworkQueue's max concurrent operations count) to give all running requests a fighting chance of reading data this cycle
+	long long toRead = maxBandwidthPerSecond/4;
+	if (maxBandwidthPerSecond > 0 && (bandwidthUsedInLastSecond + toRead > maxBandwidthPerSecond)) {
+		toRead = maxBandwidthPerSecond-bandwidthUsedInLastSecond;
+		if (toRead < 0) {
+			toRead = 0;
+		}
+	}
+
+	if (toRead == 0 || !bandwidthMeasurementDate || [bandwidthMeasurementDate timeIntervalSinceNow] < -0) {
+		//NSLog(@"sleep");
+		[NSThread sleepUntilDate:bandwidthMeasurementDate];
+		[self recordBandwidthUsage];
+	}
+	[bandwidthThrottlingLock unlock];	
+	return toRead;
+}
 
 
 @synthesize username;
 @synthesize password;
 @synthesize domain;
+@synthesize proxyUsername;
+@synthesize proxyPassword;
+@synthesize proxyDomain;
 @synthesize url;
 @synthesize delegate;
 @synthesize queue;
@@ -1941,6 +2894,7 @@ static NSError *ASITooMuchRedirectionError;
 @synthesize didFinishSelector;
 @synthesize didFailSelector;
 @synthesize authenticationRealm;
+@synthesize proxyAuthenticationRealm;
 @synthesize error;
 @synthesize complete;
 @synthesize requestHeaders;
@@ -1982,6 +2936,7 @@ static NSError *ASITooMuchRedirectionError;
 @synthesize haveBuiltPostBody;
 @synthesize fileDownloadOutputStream;
 @synthesize authenticationRetryCount;
+@synthesize proxyAuthenticationRetryCount;
 @synthesize updatedProgress;
 @synthesize shouldRedirect;
 @synthesize streamProperties;
@@ -1990,4 +2945,18 @@ static NSError *ASITooMuchRedirectionError;
 @synthesize redirectCount;
 @synthesize shouldCompressRequestBody;
 @synthesize authenticationLock;
+@synthesize needsProxyAuthentication;
+@synthesize proxyCredentials;
+@synthesize proxyHost;
+@synthesize proxyPort;
+@synthesize PACurl;
+@synthesize authenticationScheme;
+@synthesize proxyAuthenticationScheme;
+@synthesize shouldPresentAuthenticationDialog;
+@synthesize shouldPresentProxyAuthenticationDialog;
+@synthesize authenticationChallengeInProgress;
+@synthesize responseStatusMessage;
+@synthesize shouldPresentCredentialsBeforeChallenge;
 @end
+
+
