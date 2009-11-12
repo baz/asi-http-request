@@ -32,7 +32,8 @@ typedef enum _ASINetworkErrorType {
     ASIInternalErrorWhileBuildingRequestType  = 6,
     ASIInternalErrorWhileApplyingCredentialsType  = 7,
 	ASIFileManagementError = 8,
-	ASITooMuchRedirectionErrorType = 9
+	ASITooMuchRedirectionErrorType = 9,
+	ASIUnhandledExceptionError = 10
 	
 } ASINetworkErrorType;
 
@@ -86,6 +87,9 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 	
 	// Dictionary for custom HTTP request headers
 	NSMutableDictionary *requestHeaders;
+	
+	// Set to YES when the request header dictionary has been populated, used to prevent this happening more than once
+	BOOL haveBuiltRequestHeaders;
 	
 	// Will be populated with HTTP response headers from the server
 	NSDictionary *responseHeaders;
@@ -228,7 +232,7 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 	NSConditionLock *authenticationLock;
 	
 	// This lock prevents the operation from being cancelled at an inopportune moment
-	NSLock *cancelledLock;
+	NSRecursiveLock *cancelledLock;
 	
 	// Called on the delegate when the request completes successfully
 	SEL didFinishSelector;
@@ -241,9 +245,6 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 	
 	// Number of seconds to wait before timing out - default is 10
 	NSTimeInterval timeOutSeconds;
-	
-	// Autorelease pool for the main loop, since it's highly likely that this operation will run in a thread
-	NSAutoreleasePool *pool;
 	
 	// Will be YES when a HEAD request will handle the content-length before this request starts
 	BOOL shouldResetProgressIndicators;
@@ -330,6 +331,13 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 // Add a custom header to the request
 - (void)addRequestHeader:(NSString *)header value:(NSString *)value;
 
+// Populate the request headers dictionary. Called before a request is started, or by a HEAD request that needs to borrow them
+- (void)buildRequestHeaders;
+
+// Used to apply authorization header to a request before it is sent (when shouldPresentCredentialsBeforeChallenge is YES)
+- (void)applyAuthorizationHeader;
+
+// Create the post body
 - (void)buildPostBody;
 
 // Called to add data to the post body. Will append to postBody when shouldStreamPostDataFromDisk is false, or write to postBodyWriteStream when true
@@ -368,6 +376,11 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 // Call to remove the file used as the request body
 // No need to call this if the request succeeds and you didn't specify postBodyFilePath manually - it is removed automatically
 - (void)removePostDataFile;
+
+#pragma mark HEAD request
+
+// Used by ASINetworkQueue to create a HEAD request appropriate for this request with the same headers (though you can use it yourself)
+- (ASIHTTPRequest *)HEADRequest;
 
 #pragma mark upload/download progress
 
@@ -419,6 +432,15 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 // Apply authentication information and resume the request after an authentication challenge
 - (void)attemptToApplyCredentialsAndResume;
 - (void)attemptToApplyProxyCredentialsAndResume;
+
+// Attempt to show the built-in authentication dialog, returns YES if credentials were supplied, NO if user cancelled dialog / dialog is disabled / running on main thread
+// Currently only used on iPhone OS
+- (BOOL)showProxyAuthenticationDialog;
+- (BOOL)showAuthenticationDialog;
+
+// Construct a basic authentication header from the username and password supplied, and add it to the request headers
+// Used when shouldPresentCredentialsBeforeChallenge is YES
+- (void)addBasicAuthenticationHeaderWithUsername:(NSString *)theUsername andPassword:(NSString *)thePassword;
 
 #pragma mark stream status handlers
 
@@ -537,11 +559,19 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 + (void)reachabilityChanged:(NSNotification *)note;
 #endif
 
-
-- (BOOL)showProxyAuthenticationDialog;
-- (BOOL)showAuthenticationDialog;
-
+// Returns the maximum amount of data we can read as part of the current measurement period, and sleeps this thread if our allowance is used up
 + (unsigned long)maxUploadReadLength;
+
+#pragma mark miscellany 
+
+// Determines whether we're on iPhone OS 2.0 at runtime, currently used to determine whether we should apply a workaround for an issue with converting longs to doubles on iPhone OS 2
++ (BOOL)isiPhoneOS2;
+
+// Used for generating Authorization header when using basic authentication when shouldPresentCredentialsBeforeChallenge is true
+// And also by ASIS3Request
++ (NSString *)base64forData:(NSData *)theData;
+
+#pragma mark ===
 
 @property (retain) NSString *username;
 @property (retain) NSString *password;
@@ -613,4 +643,6 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 @property (assign) BOOL shouldPresentCredentialsBeforeChallenge;
 @property (assign, readonly) int authenticationRetryCount;
 @property (assign, readonly) int proxyAuthenticationRetryCount;
+@property (assign) BOOL haveBuiltRequestHeaders;
+@property (assign, nonatomic) BOOL haveBuiltPostBody;
 @end

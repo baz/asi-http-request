@@ -8,11 +8,15 @@
 
 #import "ASITestCase.h"
 
+@class ASIHTTPRequest;
+
 @interface ASIHTTPRequestTests : ASITestCase {
 	float progress;
 }
 
 - (void)testBasicDownload;
+- (void)testConditionalGET;
+- (void)testException;
 - (void)testTimeOut;
 - (void)testRequestMethod;
 - (void)testHTTPVersion;
@@ -23,6 +27,7 @@
 - (void)testDownloadProgress;
 - (void)testUploadProgress;
 - (void)testCookies;
+- (void)testRemoveCredentialsFromKeychain;
 - (void)testBasicAuthentication;
 - (void)testDigestAuthentication;
 - (void)testNTLMHandshake;
@@ -40,4 +45,6 @@
 - (void)testThrottlingDownloadBandwidth;
 - (void)testThrottlingUploadBandwidth;
 - (void)testMainThreadDelegateAuthenticationFailure;
+
+
 @end

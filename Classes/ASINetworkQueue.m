@@ -37,10 +37,11 @@
 
 - (void)dealloc
 {
-	//We need to clear the delegate on any requests that haven't got around to cleaning up yet, as otherwise they'll try to let us know if something goes wrong, and we'll be long gone by then
+	//We need to clear the queue on any requests that haven't got around to cleaning up yet, as otherwise they'll try to let us know if something goes wrong, and we'll be long gone by then
 	for (ASIHTTPRequest *request in [self operations]) {
-		[request setDelegate:nil];
+		[request setQueue:nil];
 	}
+	[userInfo release];
 	[super dealloc];
 }
 
@@ -150,8 +151,7 @@
 		
 		// If this is a GET request and we want accurate progress, perform a HEAD request first to get the content-length
 		if ([[request requestMethod] isEqualToString:@"GET"]) {
-			ASIHTTPRequest *HEADRequest = [[[ASIHTTPRequest alloc] initWithURL:[request url]] autorelease];
-			[HEADRequest setMainRequest:request];
+			ASIHTTPRequest *HEADRequest = [request HEADRequest];
 			[self addHEADOperation:HEADRequest];
 			
 			//Tell the request not to reset the progress indicator when it gets a content-length, as we will get the length from the HEAD request
@@ -231,6 +231,7 @@
 	}
 	[self setUploadProgressBytes:[self uploadProgressBytes] - bytes];
 	
+	
 	double progress = ([self uploadProgressBytes]*1.0)/([self uploadProgressTotalBytes]*1.0);
 	[ASIHTTPRequest setProgress:progress forProgressIndicator:[self uploadProgressDelegate]];
 }
@@ -243,7 +244,13 @@
 	}
 	[self setUploadProgressBytes:[self uploadProgressBytes] + bytes];
 	
-	double progress = ([self uploadProgressBytes]*1.0)/([self uploadProgressTotalBytes]*1.0);
+	double progress;
+	//Workaround for an issue with converting a long to a double on iPhone OS 2.2.1 with a base SDK >= 3.0
+	if ([ASIHTTPRequest isiPhoneOS2]) {
+		progress = [[NSNumber numberWithUnsignedLongLong:[self uploadProgressBytes]] doubleValue]/[[NSNumber numberWithUnsignedLongLong:[self uploadProgressTotalBytes]] doubleValue]; 
+	} else {
+		progress = ([self uploadProgressBytes]*1.0)/([self uploadProgressTotalBytes]*1.0);
+	}
 	[ASIHTTPRequest setProgress:progress forProgressIndicator:[self uploadProgressDelegate]];
 
 }
@@ -263,7 +270,14 @@
 		return;
 	}
 	[self setDownloadProgressBytes:[self downloadProgressBytes] + bytes];
-	double progress = ([self downloadProgressBytes]*1.0)/([self downloadProgressTotalBytes]*1.0);
+	
+	double progress;
+	//Workaround for an issue with converting a long to a double on iPhone OS 2.2.1 with a base SDK >= 3.0
+	if ([ASIHTTPRequest isiPhoneOS2]) {
+		progress = [[NSNumber numberWithUnsignedLongLong:[self downloadProgressBytes]] doubleValue]/[[NSNumber numberWithUnsignedLongLong:[self downloadProgressTotalBytes]] doubleValue]; 
+	} else {
+		progress = ([self downloadProgressBytes]*1.0)/([self downloadProgressTotalBytes]*1.0);
+	}
 	[ASIHTTPRequest setProgress:progress forProgressIndicator:[self downloadProgressDelegate]];
 }
 
@@ -314,5 +328,6 @@
 @synthesize queueDidFinishSelector;
 @synthesize delegate;
 @synthesize showAccurateProgress;
+@synthesize userInfo;
 
 @end
