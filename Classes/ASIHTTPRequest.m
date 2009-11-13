@@ -189,6 +189,8 @@ static BOOL isiPhoneOS2;
 	[self setDidFailSelector:@selector(requestFailed:)];
 	[self setURL:newURL];
 	[self setCancelledLock:[[[NSRecursiveLock alloc] init] autorelease]];
+	// By default handle authentication challenges internally
+	self.handleAuthenticationChallengeInternally = YES;
 	return self;
 }
 
@@ -1329,14 +1331,16 @@ static BOOL isiPhoneOS2;
 		CFRelease(headerFields);
 		[self setResponseStatusCode:CFHTTPMessageGetResponseStatusCode(headers)];
 		[self setResponseStatusMessage:[(NSString *)CFHTTPMessageCopyResponseStatusLine(headers) autorelease]];
-
-		// Is the server response a challenge for credentials?
-		isAuthenticationChallenge = ([self responseStatusCode] == 401);
-		if ([self responseStatusCode] == 407) {
-			isAuthenticationChallenge = YES;
-			[self setNeedsProxyAuthentication:YES];
+		
+		if(self.handleAuthenticationChallengeInternally) {
+			// Is the server response a challenge for credentials?
+			isAuthenticationChallenge = ([self responseStatusCode] == 401);
+			if ([self responseStatusCode] == 407) {
+				isAuthenticationChallenge = YES;
+				[self setNeedsProxyAuthentication:YES];
+			}
+			[self setAuthenticationChallengeInProgress:isAuthenticationChallenge];
 		}
-		[self setAuthenticationChallengeInProgress:isAuthenticationChallenge];
 		
 		// Authentication succeeded, or no authentication was required
 		if (!isAuthenticationChallenge) {
@@ -3168,6 +3172,7 @@ static BOOL isiPhoneOS2;
 @synthesize responseStatusMessage;
 @synthesize shouldPresentCredentialsBeforeChallenge;
 @synthesize haveBuiltRequestHeaders;
+@synthesize handleAuthenticationChallengeInternally;
 @end
 
 

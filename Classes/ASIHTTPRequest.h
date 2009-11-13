@@ -316,6 +316,10 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 	// This only affects credentials stored in the session cache when useSessionPersistance is YES. Credentials from the keychain are never presented unless the server asks for them
 	// Default is YES
 	BOOL shouldPresentCredentialsBeforeChallenge;
+	
+	// Variable to indicate whether the request should handle authentication challenges automatically or allow the response to pass to the calling client
+	// ntumkur 13/11/2009
+	BOOL handleAuthenticationChallengeInternally;
 }
 
 #pragma mark init / dealloc
@@ -645,4 +649,5 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 @property (assign, readonly) int proxyAuthenticationRetryCount;
 @property (assign) BOOL haveBuiltRequestHeaders;
 @property (assign, nonatomic) BOOL haveBuiltPostBody;
+@property (assign) BOOL handleAuthenticationChallengeInternally;
 @end
