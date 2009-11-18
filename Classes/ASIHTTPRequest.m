@@ -246,6 +246,7 @@ static BOOL isiPhoneOS2;
 	[compressedPostBodyFilePath release];
 	[postBodyWriteStream release];
 	[postBodyReadStream release];
+	[streamProperties release];
 	[PACurl release];
 	[responseStatusMessage release];
 	[super dealloc];
@@ -701,6 +702,11 @@ static BOOL isiPhoneOS2;
 	// Tell CFNetwork not to validate SSL certificates
 	if (!validatesSecureCertificate) {
 		CFReadStreamSetProperty(readStream, kCFStreamPropertySSLSettings, [NSMutableDictionary dictionaryWithObject:(NSString *)kCFBooleanFalse forKey:(NSString *)kCFStreamSSLValidatesCertificateChain]); 
+	}
+
+	// Set any other additional stream properties
+	for (NSString *key in streamProperties) {
+		CFReadStreamSetProperty(readStream, (CFStringRef)key, [streamProperties objectForKey:key]);
 	}
 	
 	
@@ -3159,6 +3165,7 @@ static BOOL isiPhoneOS2;
 @synthesize proxyAuthenticationRetryCount;
 @synthesize updatedProgress;
 @synthesize shouldRedirect;
+@synthesize streamProperties;
 @synthesize validatesSecureCertificate;
 @synthesize needsRedirect;
 @synthesize redirectCount;
