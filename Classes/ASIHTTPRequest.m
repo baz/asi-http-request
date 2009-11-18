@@ -248,6 +248,7 @@ static BOOL isiPhoneOS2;
 	[postBodyReadStream release];
 	[PACurl release];
 	[responseStatusMessage release];
+	[streamProperties release];
 	[super dealloc];
 }
 
@@ -702,7 +703,11 @@ static BOOL isiPhoneOS2;
 	if (!validatesSecureCertificate) {
 		CFReadStreamSetProperty(readStream, kCFStreamPropertySSLSettings, [NSMutableDictionary dictionaryWithObject:(NSString *)kCFBooleanFalse forKey:(NSString *)kCFStreamSSLValidatesCertificateChain]); 
 	}
-	
+
+	// Set any other additional stream properties
+	for (NSString *key in streamProperties) {
+		CFReadStreamSetProperty(readStream, (CFStringRef)key, [streamProperties objectForKey:key]);
+	}
 	
 	// Handle proxy settings
 
@@ -3177,6 +3182,7 @@ static BOOL isiPhoneOS2;
 @synthesize responseStatusMessage;
 @synthesize shouldPresentCredentialsBeforeChallenge;
 @synthesize haveBuiltRequestHeaders;
+@synthesize streamProperties;
 @synthesize handleAuthenticationChallengeInternally;
 @end
 

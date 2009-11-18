@@ -316,7 +316,11 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 	// This only affects credentials stored in the session cache when useSessionPersistance is YES. Credentials from the keychain are never presented unless the server asks for them
 	// Default is YES
 	BOOL shouldPresentCredentialsBeforeChallenge;
-	
+
+	// A list of any other additional stream properties to be set
+	// Key holds the stream property name, and value holds the allowed data type for the corresponding property
+	NSDictionary *streamProperties;
+
 	// Indicate whether the request should handle authentication challenges automatically or allow the response to pass to the caller
 	BOOL handleAuthenticationChallengeInternally;
 }
@@ -647,5 +651,6 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 @property (assign, readonly) int proxyAuthenticationRetryCount;
 @property (assign) BOOL haveBuiltRequestHeaders;
 @property (assign, nonatomic) BOOL haveBuiltPostBody;
+@property (retain) NSDictionary *streamProperties;
 @property (assign) BOOL handleAuthenticationChallengeInternally;
 @end
