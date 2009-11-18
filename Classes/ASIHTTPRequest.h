@@ -317,8 +317,7 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 	// Default is YES
 	BOOL shouldPresentCredentialsBeforeChallenge;
 	
-	// Variable to indicate whether the request should handle authentication challenges automatically or allow the response to pass to the calling client
-	// ntumkur 13/11/2009
+	// Indicate whether the request should handle authentication challenges automatically or allow the response to pass to the caller
 	BOOL handleAuthenticationChallengeInternally;
 }
 
