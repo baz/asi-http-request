@@ -38,11 +38,14 @@ IMPORTANT
 	ASINetworkQueue *postQueue;
 	
 	ASINetworkQueue *testNTLMQueue;
+	
+	ASINetworkQueue *addMoreRequestsQueue;
+	int requestsFinishedCount;
 }
 
 - (void)testFailure;
 - (void)testFailureCancelsOtherRequests;
-- (void)testProgress;
+- (void)testDownloadProgress;
 - (void)testUploadProgress;
 - (void)testProgressWithAuthentication;
 - (void)testWithNoListener;
@@ -71,5 +74,5 @@ IMPORTANT
 @property (retain) ASINetworkQueue *cancelQueue;
 @property (retain) ASINetworkQueue *postQueue;
 @property (retain) ASINetworkQueue *testNTLMQueue;
-
+@property (retain) ASINetworkQueue *addMoreRequestsQueue;
 @end
