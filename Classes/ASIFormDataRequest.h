@@ -1,6 +1,6 @@
 //
 //  ASIFormDataRequest.h
-//  asi-http-request
+//  Part of ASIHTTPRequest -> http://allseeing-i.com/ASIHTTPRequest
 //
 //  Created by Ben Copsey on 07/11/2008.
 //  Copyright 2008-2009 All-Seeing Interactive. All rights reserved.
@@ -8,6 +8,7 @@
 
 #import <Foundation/Foundation.h>
 #import "ASIHTTPRequest.h"
+#import "ASIHTTPRequestConfig.h"
 
 typedef enum _ASIPostFormat {
     ASIMultipartFormDataPostFormat = 0,
@@ -15,7 +16,7 @@ typedef enum _ASIPostFormat {
 	
 } ASIPostFormat;
 
-@interface ASIFormDataRequest : ASIHTTPRequest {
+@interface ASIFormDataRequest : ASIHTTPRequest <NSCopying> {
 
 	// Parameters that will be POSTed to the url
 	NSMutableDictionary *postData;
@@ -27,7 +28,7 @@ typedef enum _ASIPostFormat {
 	
 	NSStringEncoding stringEncoding;
 	
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 	// Will store a string version of the request body that will be printed to the console when ASIHTTPREQUEST_DEBUG is set in GCC_PREPROCESSOR_DEFINITIONS
 	NSString *debugBodyString;
 #endif

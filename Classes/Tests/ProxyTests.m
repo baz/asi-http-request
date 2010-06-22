@@ -1,6 +1,6 @@
 //
 //  ProxyTests.m
-//  Mac
+//  Part of ASIHTTPRequest -> http://allseeing-i.com/ASIHTTPRequest
 //
 //  Created by Ben Copsey on 02/08/2009.
 //  Copyright 2009 All-Seeing Interactive. All rights reserved.
@@ -18,20 +18,38 @@ static NSString *proxyPassword = @"";
 
 @implementation ProxyTests
 
+- (void)testProxyForHTTPS
+{
+	// Also test we are case-insensitive comparing our scheme
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"HTTPS://selfsigned.allseeing-i.com/"]];
+	[request setValidatesSecureCertificate:NO];
+	[request startSynchronous];
+	BOOL success = ([[request responseString] rangeOfString:@"All-Seeing Interactive"].location != NSNotFound);
+	GHAssertTrue(success,@"Failed to connect to an HTTPS URL using a proxy");
+}
+
 - (void)testAutoConfigureWithPAC
 {
-	// To run this test, specify the location of the pac script that is available at http://developer.apple.com/samplecode/CFProxySupportTool/listing1.html
-	NSString *pacurl = @"file:///Users/ben/Desktop/test.pac";
+
+	NSString *pacurl = @"file:///non-existent.pac";
 	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com"]];
 	[request setPACurl:[NSURL URLWithString:pacurl]];
-	[request start];
+	[request startSynchronous];
+	GHAssertNil([request proxyHost],@"Shouldn't use a proxy here");
+	GHAssertNil([request error],@"Request failed when unable to fetch PAC (should assume no proxy instead)");
+	
+	// To run this test, specify the location of the pac script that is available at http://developer.apple.com/samplecode/CFProxySupportTool/listing1.html
+	pacurl = @"file:///Users/ben/Desktop/test.pac";
+	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com"]];
+	[request setPACurl:[NSURL URLWithString:pacurl]];
+	[request startSynchronous];
 
 	BOOL success = [[request proxyHost] isEqualToString:@"proxy1.apple.com"];
 	GHAssertTrue(success,@"Failed to use the correct proxy");
 	
 	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://www.apple.com"]];
 	[request setPACurl:[NSURL URLWithString:pacurl]];
-	[request start];
+	[request startSynchronous];
 	GHAssertNil([request proxyHost],@"Used a proxy when the script told us to go direct");
 }
 
@@ -39,13 +57,13 @@ static NSString *proxyPassword = @"";
 {
 	// To run this test, specify the pac script above in your network settings
 	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com"]];
-	[request start];
+	[request startSynchronous];
 
 	BOOL success = [[request proxyHost] isEqualToString:@"proxy1.apple.com"];
 	GHAssertTrue(success,@"Failed to use the correct proxy");
 	
 	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://www.apple.com"]];
-	[request start];
+	[request startSynchronous];
 	GHAssertNil([request proxyHost],@"Used a proxy when the script told us to go direct");
 }
 
@@ -57,7 +75,7 @@ static NSString *proxyPassword = @"";
 	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com"]];
 	[request setProxyHost:proxyHost];
 	[request setProxyPort:proxyPort];
-	[request start];
+	[request startSynchronous];
 	
 	// Check data is as expected
 	NSRange notFound = NSMakeRange(NSNotFound, 0);
@@ -68,7 +86,7 @@ static NSString *proxyPassword = @"";
 - (void)testProxyAutodetect
 {	
 	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com"]];
-	[request start];
+	[request startSynchronous];
 	
 	BOOL success = ([request proxyHost] && [request proxyPort]);
 	GHAssertTrue(success,@"Failed to detect the proxy");		
@@ -85,7 +103,7 @@ static NSString *proxyPassword = @"";
 	[request setProxyPort:proxyPort];
 	[request setProxyUsername:proxyUsername];
 	[request setProxyPassword:proxyPassword];
-	[request start];
+	[request startSynchronous];
 	
 	// Check data is as expected
 	NSRange notFound = NSMakeRange(NSNotFound, 0);

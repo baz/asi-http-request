@@ -1,6 +1,6 @@
 //
 //  ProxyTests.h
-//  Mac
+//  Part of ASIHTTPRequest -> http://allseeing-i.com/ASIHTTPRequest
 //
 //  Created by Ben Copsey on 02/08/2009.
 //  Copyright 2009 All-Seeing Interactive. All rights reserved.
@@ -21,6 +21,7 @@
 - (void)testProxyAutodetect;
 - (void)testProxyWithSuppliedAuthenticationCredentials;
 - (void)testDoubleAuthentication;
+- (void)testProxyForHTTPS;
 
 @property (retain) ASINetworkQueue *queue;
 @property (assign) BOOL complete;

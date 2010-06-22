@@ -1,6 +1,6 @@
 //
 //  ASIFormDataRequest.m
-//  asi-http-request
+//  Part of ASIHTTPRequest -> http://allseeing-i.com/ASIHTTPRequest
 //
 //  Created by Ben Copsey on 07/11/2008.
 //  Copyright 2008-2009 All-Seeing Interactive. All rights reserved.
@@ -18,7 +18,7 @@
 @property (retain) NSMutableDictionary *postData;
 @property (retain) NSMutableDictionary *fileData;
 
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 - (void)addToDebugBody:(NSString *)string;
 @property (retain, nonatomic) NSString *debugBodyString;
 #endif
@@ -54,7 +54,7 @@
 
 - (void)dealloc
 {
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 	[debugBodyString release]; 
 #endif
 	
@@ -71,7 +71,6 @@
 		[self setPostData:[NSMutableDictionary dictionary]];
 	}
 	[[self postData] setValue:[value description] forKey:key];
-	[self setRequestMethod:@"POST"];
 }
 
 - (void)setFile:(NSString *)filePath forKey:(NSString *)key
@@ -98,8 +97,7 @@
 			fileName = [(NSString *)data lastPathComponent];
 		}
 	
-		// If we were given the path to a file, and the user didn't specify a mime type, we can detect it (currently only on Mac OS)
-		// Will return 'application/octet-stream' on iPhone, or if the mime type cannot be determined
+		// If we were given the path to a file, and the user didn't specify a mime type, we can detect it from the file extension
 		if (!contentType) {
 			contentType = [ASIHTTPRequest mimeTypeForFileAtPath:data];
 		}
@@ -107,7 +105,6 @@
 	
 	NSDictionary *fileInfo = [NSDictionary dictionaryWithObjectsAndKeys:data, @"data", contentType, @"contentType", fileName, @"fileName", nil];
 	[[self fileData] setObject:fileInfo forKey:key];
-	[self setRequestMethod: @"POST"];
 }
 
 - (void)setData:(NSData *)data forKey:(NSString *)key
@@ -126,7 +123,6 @@
 	
 	NSDictionary *fileInfo = [NSDictionary dictionaryWithObjectsAndKeys:data, @"data", contentType, @"contentType", fileName, @"fileName", nil];
 	[[self fileData] setObject:fileInfo forKey:key];
-	[self setRequestMethod: @"POST"];
 }
 
 - (void)buildPostBody
@@ -134,8 +130,11 @@
 	if ([self haveBuiltPostBody]) {
 		return;
 	}
+	if (![[self requestMethod] isEqualToString:@"PUT"]) {
+		[self setRequestMethod:@"POST"];
+	}
 	
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 	[self setDebugBodyString:@""];	
 #endif
 	
@@ -155,7 +154,7 @@
 
 	[super buildPostBody];
 	
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 	NSLog(@"%@",[self debugBodyString]);
 	[self setDebugBodyString:nil];
 #endif
@@ -164,7 +163,7 @@
 
 - (void)buildMultipartFormDataPostBody
 {
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 	[self addToDebugBody:@"\r\n==== Building a multipart/form-data body ====\r\n"];
 #endif
 	
@@ -181,7 +180,7 @@
 	NSString *endItemBoundary = [NSString stringWithFormat:@"\r\n--%@\r\n",stringBoundary];
 	NSEnumerator *e = [[self postData] keyEnumerator];
 	NSString *key;
-	int i=0;
+	NSUInteger i=0;
 	while (key = [e nextObject]) {
 		[self appendPostString:[NSString stringWithFormat:@"Content-Disposition: form-data; name=\"%@\"\r\n\r\n",key]];
 		[self appendPostString:[[self postData] objectForKey:key]];
@@ -217,7 +216,7 @@
 	
 	[self appendPostString:[NSString stringWithFormat:@"\r\n--%@--\r\n",stringBoundary]];
 	
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 	[self addToDebugBody:@"==== End of multipart/form-data body ====\r\n"];
 #endif
 }
@@ -232,7 +231,7 @@
 		return;
 	}
 	
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 	[self addToDebugBody:@"\r\n==== Building an application/x-www-form-urlencoded body ====\r\n"]; 
 #endif
 	
@@ -244,27 +243,27 @@
 	
 	NSEnumerator *e = [[self postData] keyEnumerator];
 	NSString *key;
-	int i=0;
-	int count = [[self postData] count]-1;
+	NSUInteger i=0;
+	NSUInteger count = [[self postData] count]-1;
 	while (key = [e nextObject]) {
         NSString *data = [NSString stringWithFormat:@"%@=%@%@", [self encodeURL:key], [self encodeURL:[[self postData] objectForKey:key]],(i<count ?  @"&" : @"")]; 
 		[self appendPostString:data];
 		i++;
 	}
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 	[self addToDebugBody:@"\r\n==== End of application/x-www-form-urlencoded body ====\r\n"]; 
 #endif
 }
 
 - (void)appendPostString:(NSString *)string
 {
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 	[self addToDebugBody:string];
 #endif
 	[super appendPostData:[string dataUsingEncoding:[self stringEncoding]]];
 }
 
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 - (void)appendPostData:(NSData *)data
 {
 	[self addToDebugBody:[NSString stringWithFormat:@"[%lu bytes of data]",(unsigned long)[data length]]];
@@ -276,7 +275,7 @@
 	NSError *err = nil;
 	unsigned long long fileSize = [[[[NSFileManager defaultManager] attributesOfItemAtPath:file error:&err] objectForKey:NSFileSize] unsignedLongLongValue];
 	if (err) {
-		[self addToDebugBody:[NSString stringWithFormat:@"[Error: Failed to obtain the file of the file at '%@']",file]];
+		[self addToDebugBody:[NSString stringWithFormat:@"[Error: Failed to obtain the size of the file at '%@']",file]];
 	} else {
 		[self addToDebugBody:[NSString stringWithFormat:@"[%llu bytes of data from file '%@']",fileSize,file]];
 	}
@@ -290,11 +289,24 @@
 }
 #endif
 
+#pragma mark NSCopying
+
+- (id)copyWithZone:(NSZone *)zone
+{
+	ASIFormDataRequest *newRequest = [super copyWithZone:zone];
+	[newRequest setPostData:[[[self postData] copyWithZone:zone] autorelease]];
+	[newRequest setFileData:[[[self fileData] copyWithZone:zone] autorelease]];
+	[newRequest setPostFormat:[self postFormat]];
+	[newRequest setStringEncoding:[self stringEncoding]];
+	[newRequest setRequestMethod:[self requestMethod]];
+	return newRequest;
+}
+
 @synthesize postData;
 @synthesize fileData;
 @synthesize postFormat;
 @synthesize stringEncoding;
-#if ASIHTTPREQUEST_DEBUG
+#if DEBUG_FORM_DATA_REQUEST
 @synthesize debugBodyString;
 #endif
 @end

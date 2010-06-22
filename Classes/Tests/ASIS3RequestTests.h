@@ -1,6 +1,6 @@
 //
 //  ASIS3RequestTests.h
-//  asi-http-request
+//  Part of ASIHTTPRequest -> http://allseeing-i.com/ASIHTTPRequest
 //
 //  Created by Ben Copsey on 12/07/2009.
 //  Copyright 2009 All-Seeing Interactive. All rights reserved.
@@ -20,6 +20,7 @@
 - (void)testFailure;
 - (void)testListRequest;
 - (void)testSubclasses;
+- (void)createTestBucket;
 
 @property (retain,nonatomic) ASINetworkQueue *networkQueue;
 @end

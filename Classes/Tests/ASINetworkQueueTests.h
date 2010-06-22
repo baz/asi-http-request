@@ -1,6 +1,6 @@
 //
 //  ASINetworkQueueTests.h
-//  asi-http-request
+//  Part of ASIHTTPRequest -> http://allseeing-i.com/ASIHTTPRequest
 //
 //  Created by Ben Copsey on 08/11/2008.
 //  Copyright 2008 All-Seeing Interactive. All rights reserved.
@@ -25,6 +25,8 @@ IMPORTANT
 	BOOL request_didfail;
 	BOOL request_succeeded;
 	float progress;
+	int addedRequests;
+	
 	
 	NSOperationQueue *immediateCancelQueue;
 	NSMutableArray *failedRequests;
@@ -41,8 +43,14 @@ IMPORTANT
 	
 	ASINetworkQueue *addMoreRequestsQueue;
 	int requestsFinishedCount;
+	
+	BOOL started;
+	BOOL finished;
+	BOOL failed;
+	BOOL headFailed;
+	
+	int queueFinishedCallCount;
 }
-
 - (void)testFailure;
 - (void)testFailureCancelsOtherRequests;
 - (void)testDownloadProgress;
@@ -60,13 +68,9 @@ IMPORTANT
 - (void)testMultipleDownloadsThrottlingBandwidth;
 - (void)testMultipleUploadsThrottlingBandwidth;
 
-/*
-- (void)testCancelStressTest;
-*/
-
 - (void)testDelegateAuthenticationCredentialsReuse;
 - (void)testPOSTWithAuthentication;
-
+- (void)testHEADFailure;
 @property (retain) NSOperationQueue *immediateCancelQueue;
 @property (retain) NSMutableArray *failedRequests;
 @property (retain) NSMutableArray *finishedRequests;

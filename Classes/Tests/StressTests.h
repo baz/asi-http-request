@@ -1,6 +1,6 @@
 //
 //  StressTests.h
-//  iPhone
+//  Part of ASIHTTPRequest -> http://allseeing-i.com/ASIHTTPRequest
 //
 //  Created by Ben Copsey on 30/10/2009.
 //  Copyright 2009 All-Seeing Interactive. All rights reserved.
@@ -26,6 +26,8 @@
 	NSLock *createRequestLock;
 }
 
+- (void)testCancelQueue;
+
 - (void)testCancelStressTest;
 - (void)performCancelRequest;
 
@@ -34,6 +36,8 @@
 
 - (void)testSetDelegate;
 - (void)performSetDelegateRequest;
+
+- (void)setProgress:(float)newProgress;
 
 @property (retain) ASIHTTPRequest *cancelRequest;
 @property (retain) NSDate *cancelStartDate;
