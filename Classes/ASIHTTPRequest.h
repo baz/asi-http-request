@@ -825,11 +825,8 @@ extern unsigned long const ASIWWANBandwidthThrottleAmount;
 @property (assign, readonly) int proxyAuthenticationRetryCount;
 @property (assign) BOOL haveBuiltRequestHeaders;
 @property (assign, nonatomic) BOOL haveBuiltPostBody;
-<<<<<<< HEAD
 @property (assign) BOOL handleAuthenticationChallengeInternally;
 @property (assign, readonly) BOOL isSynchronous;
-=======
->>>>>>> 1247da7ebb1e5a6e96e486d1b7d3fbc15e9e6bb7
 @property (assign, readonly) BOOL inProgress;
 @property (assign) int numberOfTimesToRetryOnTimeout;
 @property (assign, readonly) int retryCount;

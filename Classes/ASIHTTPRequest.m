@@ -276,11 +276,8 @@ static NSOperationQueue *sharedQueue = nil;
 	[self setDidReceiveDataSelector:@selector(request:didReceiveData:)];
 	[self setURL:newURL];
 	[self setCancelledLock:[[[NSRecursiveLock alloc] init] autorelease]];
-<<<<<<< HEAD
 	[self setHandleAuthenticationChallengeInternally:YES];
-=======
 	[self setDownloadCache:[[self class] defaultCache]];
->>>>>>> 1247da7ebb1e5a6e96e486d1b7d3fbc15e9e6bb7
 	return self;
 }
 
