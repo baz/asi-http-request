@@ -8,7 +8,6 @@
 
 #import "ASIHTTPRequestTests.h"
 #import "ASIHTTPRequest.h"
-#import "ASINSStringAdditions.h"
 #import "ASINetworkQueue.h"
 #import "ASIFormDataRequest.h"
 #import <SystemConfiguration/SystemConfiguration.h>
@@ -447,6 +446,13 @@
 	
 	success = ([[[request originalURL] absoluteString] isEqualToString:@"http://allseeing-i.com/ASIHTTPRequest/tests/redirect/301"]);
 	GHAssertTrue(success,@"Failed to preserve original url");	
+
+	// Ensure user agent is preserved
+	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/redirect/301"]];
+	[request addRequestHeader:@"User-Agent" value:@"test"];
+	[request startSynchronous];
+	success = ([[[request requestHeaders] objectForKey:@"User-Agent"] isEqualToString:@"test"]);
+	GHAssertTrue(success,@"Failed to preserve original user agent on redirect");
 }
 
 // Using a persistent connection for HTTP 305-307 would cause crashes on the redirect, not really sure why
@@ -536,7 +542,7 @@
 	ASIHTTPRequest *request = [[[ASIHTTPRequest alloc] initWithURL:url] autorelease];
 	[request startSynchronous];
 	
-	BOOL success = ([request contentLength] == 18443);
+	BOOL success = ([request contentLength] == 27872);
 	GHAssertTrue(success,@"Got wrong content length");
 }
 
@@ -705,7 +711,7 @@
 	for (cookie in cookies) {
 		if ([[cookie name] isEqualToString:@"ASIHTTPRequestTestCookie"]) {
 			foundCookie = YES;
-			success = [[[cookie value] decodedCookieValue] isEqualToString:@"This is the value"];
+			success = [[cookie value] isEqualToString:@"This+is+the+value"];
 			GHAssertTrue(success,@"Failed to store the correct value for a cookie");
 			success = [[cookie domain] isEqualToString:@"allseeing-i.com"];
 			GHAssertTrue(success,@"Failed to store the correct domain for a cookie");
@@ -758,7 +764,7 @@
 	NSDictionary *cookieProperties = [[[NSMutableDictionary alloc] init] autorelease];
 	
 	// We'll add a line break to our cookie value to test it gets correctly encoded
-	[cookieProperties setValue:[@"Test\r\nValue" encodedCookieValue] forKey:NSHTTPCookieValue];
+	[cookieProperties setValue:@"Test%0D%0AValue" forKey:NSHTTPCookieValue];
 	[cookieProperties setValue:@"ASIHTTPRequestTestCookie" forKey:NSHTTPCookieName];
 	[cookieProperties setValue:@"allseeing-i.com" forKey:NSHTTPCookieDomain];
 	[cookieProperties setValue:[NSDate dateWithTimeIntervalSinceNow:60*60*4] forKey:NSHTTPCookieExpires];
@@ -1560,12 +1566,12 @@
 	[self setResponseData:[NSMutableData dataWithLength:0]];
 	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/the_great_american_novel_%28young_readers_edition%29.txt"]];
 	[request setDelegate:self];
-	[request setDidReceiveDataSelector:@selector(testRequest:didReceiveData:)];
-	[request setDidFinishSelector:@selector(testRequestFinished:)];
+	[request setDidReceiveDataSelector:@selector(theTestRequest:didReceiveData:)];
+	[request setDidFinishSelector:@selector(theTestRequestFinished:)];
 	[request startAsynchronous];
 }
 
-- (void)testRequestFinished:(ASIHTTPRequest *)request
+- (void)theTestRequestFinished:(ASIHTTPRequest *)request
 {
 	ASIHTTPRequest *request2 = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/the_great_american_novel_%28young_readers_edition%29.txt"]];
 	[request2 startSynchronous];
@@ -1574,9 +1580,55 @@
 	GHAssertTrue(success,@"Failed to correctly download and store the response using a delegate");
 }
 
-- (void)testRequest:(ASIHTTPRequest *)request didReceiveData:(NSData *)data
+- (void)theTestRequest:(ASIHTTPRequest *)request didReceiveData:(NSData *)data
 {
 	[[self responseData] appendData:data];
+}
+
+
+- (void)testNilPortCredentialsMatching
+{
+	// Test for http://github.com/pokeb/asi-http-request/issues#issue/39
+	[ASIHTTPRequest clearSession];
+	ASIHTTPRequest *request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com:80/ASIHTTPRequest/tests/basic-authentication"]];
+	[request setUsername:@"secret_username"];
+	[request setPassword:@"secret_password"];
+	[request startSynchronous];
+
+	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com/ASIHTTPRequest/tests/basic-authentication"]];
+	[request startSynchronous];
+
+	// Now let's test the other way around
+	[ASIHTTPRequest clearSession];
+
+	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com:/ASIHTTPRequest/tests/basic-authentication"]];
+	[request setUsername:@"secret_username"];
+	[request setPassword:@"secret_password"];
+	[request startSynchronous];
+
+	request = [ASIHTTPRequest requestWithURL:[NSURL URLWithString:@"http://allseeing-i.com:80/ASIHTTPRequest/tests/basic-authentication"]];
+	[request startSynchronous];
+}
+
+
+- (void)testRFC1123DateParsing
+{
+	unsigned dateUnits = NSYearCalendarUnit | NSMonthCalendarUnit |  NSDayCalendarUnit | NSHourCalendarUnit | NSMinuteCalendarUnit | NSSecondCalendarUnit | NSWeekdayCalendarUnit;
+	NSCalendar *calendar = [[[NSCalendar alloc] initWithCalendarIdentifier:NSGregorianCalendar] autorelease];
+	[calendar setTimeZone:[NSTimeZone timeZoneForSecondsFromGMT:0]];
+	NSString *dateString = @"Thu, 19 Nov 1981 08:52:01 GMT";
+	NSDate *date = [ASIHTTPRequest dateFromRFC1123String:dateString];
+	NSDateComponents *components = [calendar components:dateUnits fromDate:date];
+	NSLog(@"%i",[components weekday]);
+	BOOL success = ([components year] == 1981 && [components month] == 11 && [components day] == 19 && [components weekday] == 5 && [components hour] == 8 && [components minute] == 52 && [components second] == 1);
+	GHAssertTrue(success,@"Failed to parse an RFC1123 date correctly");
+
+	dateString = @"4 May 2010 00:59 CET";
+	date = [ASIHTTPRequest dateFromRFC1123String:dateString];
+	components = [calendar components:dateUnits fromDate:date];
+	success = ([components year] == 2010 && [components month] == 5 && [components day] == 3 && [components hour] == 23 && [components minute] == 59);
+	GHAssertTrue(success,@"Failed to parse an RFC1123 date correctly");
+
 }
 
 @synthesize responseData;

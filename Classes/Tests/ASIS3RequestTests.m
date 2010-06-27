@@ -231,6 +231,14 @@ static NSString *bucket = @"";
 	[request startSynchronous];
 	success = [[request responseString] isEqualToString:@"This is my content"];
 	GHAssertTrue(success,@"Failed to GET the correct data from S3");
+
+	// Test fetch subresource
+	request = [ASIS3ObjectRequest requestWithBucket:bucket key:key subResource:@"acl"];
+	[request setSecretAccessKey:secretAccessKey];
+	[request setAccessKey:accessKey];
+	[request startSynchronous];
+	success = ([[request responseString] rangeOfString:@"<AccessControlPolicy"].location != NSNotFound);
+	GHAssertTrue(success,@"Failed to GET a subresource");
 	
 	// COPY the file
 	request = [ASIS3ObjectRequest COPYRequestFromBucket:bucket key:key toBucket:bucket key:@"test-copy"];
@@ -445,7 +453,7 @@ static NSString *bucket = @"";
 	[listRequest setMarker:@"bar"];
 	[listRequest setMaxResultCount:5];
 	[listRequest createQueryString];
-	NSString *expectedURL = [NSString stringWithFormat:@"http://%@.s3.amazonaws.com/?acl&prefix=foo&key-marker=bar&delimiter=/&max-keys=5",bucket];
+	NSString *expectedURL = [NSString stringWithFormat:@"http://%@.s3.amazonaws.com/?acl&prefix=foo&marker=bar&delimiter=/&max-keys=5",bucket];
 	success = ([[[listRequest url] absoluteString] isEqualToString:expectedURL]);
 	GHAssertTrue(success,@"Generated the wrong url when requesting a subresource");
 	

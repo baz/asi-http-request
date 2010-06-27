@@ -32,6 +32,7 @@
 {
 	NSString *path = [ASIS3Request stringByURLEncodingForS3Path:key];
 	ASIS3ObjectRequest *request = [[[self alloc] initWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"http://%@.s3.amazonaws.com%@?%@",bucket,path,subResource]]] autorelease];
+	[request setSubResource:subResource];
 	[request setBucket:bucket];
 	[request setKey:key];
 	return request;
@@ -98,6 +99,7 @@
 	[mimeType release];
 	[sourceKey release];
 	[sourceBucket release];
+	[subResource release];
 	[super dealloc];
 }
 
@@ -114,6 +116,9 @@
 
 - (NSString *)canonicalizedResource
 {
+	if ([[self subResource] length] > 0) {
+		return [NSString stringWithFormat:@"/%@%@?%@",[self bucket],[ASIS3Request stringByURLEncodingForS3Path:[self key]], [self subResource]];
+	}
 	return [NSString stringWithFormat:@"/%@%@",[self bucket],[ASIS3Request stringByURLEncodingForS3Path:[self key]]];
 }
 
@@ -137,10 +142,11 @@
 }
 
 
-
 @synthesize bucket;
 @synthesize key;
 @synthesize sourceBucket;
 @synthesize sourceKey;
 @synthesize mimeType;
+@synthesize subResource;
+
 @end
