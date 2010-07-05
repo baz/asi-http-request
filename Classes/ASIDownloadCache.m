@@ -228,7 +228,7 @@ static NSString *permanentCacheFolder = @"PermanentStore";
 
 	if ([self shouldRespectCacheControlHeaders]) {
 
-		// Look for an Expires header to see if the content is out of data
+		// Look for an Expires header to see if the content is out of date
 		NSString *expires = [cachedHeaders objectForKey:@"Expires"];
 		if (expires) {
 			if ([[ASIHTTPRequest dateFromRFC1123String:expires] timeIntervalSinceNow] < 0) {

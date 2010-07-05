@@ -645,7 +645,7 @@ static NSOperationQueue *sharedQueue = nil;
 			}
 
 			// See if we should pull from the cache rather than fetching the data
-			if ([self cachePolicy] == ASIOnlyLoadIfNotCachedCachePolicy) {
+			if ([self cachePolicy] == ASIOnlyLoadIfNotCachedCachePolicy || [self cachePolicy] == ASIOnlyLoadIfNotCachedAndNotExpiredCachePolicy) {
 				if ([self useDataFromCache]) {
 					return;
 				}
@@ -2727,7 +2727,7 @@ static NSOperationQueue *sharedQueue = nil;
 		return NO;
 	}
 	
-	if ([self cachePolicy] == ASIReloadIfDifferentCachePolicy) {
+	if ([self cachePolicy] == ASIReloadIfDifferentCachePolicy || [self cachePolicy] == ASIOnlyLoadIfNotCachedAndNotExpiredCachePolicy) {
 		if (![[self downloadCache] isCachedDataCurrentForRequest:self]) {
 			[[self downloadCache] removeCachedDataForRequest:self];
 			return NO;

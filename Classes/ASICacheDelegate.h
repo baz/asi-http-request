@@ -14,7 +14,8 @@ typedef enum _ASICachePolicy {
 	ASIIgnoreCachePolicy = 1,
 	ASIReloadIfDifferentCachePolicy = 2,
 	ASIOnlyLoadIfNotCachedCachePolicy = 3,
-	ASIUseCacheIfLoadFailsCachePolicy = 4
+	ASIOnlyLoadIfNotCachedAndNotExpiredCachePolicy = 4,
+	ASIUseCacheIfLoadFailsCachePolicy = 5
 } ASICachePolicy;
 
 typedef enum _ASICacheStoragePolicy {
