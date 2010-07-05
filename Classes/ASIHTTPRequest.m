@@ -883,14 +883,14 @@ static NSOperationQueue *sharedQueue = nil;
         return;
     }
 
+	// Set additional stream properties
+	for (NSString *key in streamProperties) {
+		CFReadStreamSetProperty((CFReadStreamRef)[self readStream], (CFStringRef)key, [streamProperties objectForKey:key]);
+	}
+
 	// Tell CFNetwork not to validate SSL certificates
 	if (![self validatesSecureCertificate] && [[[[self url] scheme] lowercaseString] isEqualToString:@"https"]) {
 		CFReadStreamSetProperty((CFReadStreamRef)[self readStream], kCFStreamPropertySSLSettings, [NSMutableDictionary dictionaryWithObject:(NSString *)kCFBooleanFalse forKey:(NSString *)kCFStreamSSLValidatesCertificateChain]); 
-	}
-
-	// Set any other additional stream properties
-	for (NSString *key in streamProperties) {
-		CFReadStreamSetProperty((CFReadStreamRef)[self readStream], (CFStringRef)key, [streamProperties objectForKey:key]);
 	}
 	
 	//
